@@ -1,0 +1,26 @@
+{
+    "id": "B9EA8065",
+    "path": "~/Documents/GitHub/bqq/R/getDesignMatrix.R",
+    "project_path": "R/getDesignMatrix.R",
+    "type": "r_source",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1761236760128.0,
+    "source_on_save": false,
+    "relative_order": 2,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "80,10",
+        "scrollLine": "57"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1761237212,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1761237212358,
+    "read_only": false,
+    "read_only_alternatives": []
+}

@@ -1,0 +1,26 @@
+{
+    "id": "4535EB77",
+    "path": "~/Documents/GitHub/bqq/R/getInference.R",
+    "project_path": "R/getInference.R",
+    "type": "r_source",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1761236874070.0,
+    "source_on_save": false,
+    "relative_order": 4,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "403,10",
+        "scrollLine": "380"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1761237452,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1761237452628,
+    "read_only": false,
+    "read_only_alternatives": []
+}
