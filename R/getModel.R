@@ -1,270 +1,3 @@
-stan_code <- "data {
-  int<lower=1> n;                  // observations
-  int<lower=0> p;                  // predictors in eta (X)
-  int<lower=2> m;                  // quantiles
-  int<lower=0> r;                  // predictors in eta (H) — can be 0
-
-  matrix[n, p] X;                  // n x p
-  matrix[n, r] H;                  // n x r  (new)
-  vector[n] y;
-  vector[n] offset;
-  vector[m] tau_q;
-
-  real<lower=1e-12> base_scale;
-  real<lower=0>      c_sigma;
-
-  real<lower=0> penalty_c;
-
-  real T_rel;                  // smoothing temperature (dimensionless, learned upstream)
-
-
-  // Adaptive LASSO for gamma
-  //matrix[m, r] w_gamma;           // weights >= 0 (element-wise, or make it vector[r] if shared)
-  //real<lower=0> lambda_lasso2;     // global L1 penalty level
-
-  real<lower=0> lambda_lasso2_a;
-  real<lower=0> lambda_lasso2_b;
-
-  real<lower=0, upper = 1> jittering;
-  real<lower=0, upper = 1> log_flag;
-
-}
-
-transformed data {
-  // Quantile kernel Q[a,b] = min(tau_a, tau_b) - tau_a * tau_b
-  matrix[m, m] Q;
-  for (a in 1:m)
-    for (b in 1:m)
-      Q[a, b] = fmin(tau_q[a], tau_q[b]) - tau_q[a] * tau_q[b];
-
-  // ----- Build combined design Z = [X | H] (n x pr) -----
-  int pr = p + r;
-  matrix[n, pr] Z;
-  {
-    // Fill X columns (if any)
-    for (j in 1:p)
-      for (i in 1:n)
-        Z[i, j] = X[i, j];
-
-    // Fill H columns (if any)
-    for (j in 1:r)
-      for (i in 1:n)
-        Z[i, p + j] = H[i, j];
-  }
-
-  // ----- Gram for score: Gs = Z'Z / n and its Cholesky -----
-  matrix[pr, pr] Gs;
-  matrix[pr, pr] L_Gs;
-  if (pr > 0) {
-    matrix[pr, n] Zt = Z';
-    Gs = (Zt * Z) / n;
-    for (k in 1:pr) Gs[k, k] = Gs[k, k] + 1e-8;  // tiny ridge
-    L_Gs = cholesky_decompose(Gs);
-  } else {
-    Gs   = rep_matrix(0, 0, 0);
-    L_Gs = rep_matrix(0, 0, 0);
-  }
-}
-
-
-parameters {
-  // Random-walk increments (non-centered)
-  matrix[m, n-1] z_incr;
-  vector<lower=0>[m] tau_rw;
-  vector[m]       mu0;
-
-  // X-coefficients (simple Normal prior, as in your code)
-  matrix[m, p] beta;
-
-  // KEEP gamma as the actual coefficients:
-  //matrix[m, r] gamma;
-
-  // Bayesian LASSO local scales (variance parameters)
-  //matrix<lower=0>[m, r] tau_gamma;          // element-wise local variances
-
-  matrix[m, r] gamma;
-  vector<lower=0>[r] tau_gamma_group;   // one per H column
-
-  // Global LASSO rate (λ > 0); you can put prior on λ or on log λ
-  real<lower=0> lambda_lasso2;
-
-
-  // per-quantile scale carried in score
-  //real<lower=1e-12> sigma_q;
-
-  vector<lower=1e-12, upper = 1>[n] u;
-}
-
-transformed parameters {
-  // RW paths
-  matrix[m, n] mu;
-  for (q in 1:m) {
-    mu[q,1] = mu0[q];
-    for (t in 2:n)
-      mu[q,t] = mu[q,t-1] + tau_rw[q] * z_incr[q,t-1];
-  }
-
-  // Smoothing temperature on data scale
-  real<lower=1e-12> smooth_T = base_scale * T_rel;
-
-  vector[n] y_eff;
-  y_eff = y;
-
-  {
-
-    if (jittering == 1) {
-      y_eff = y_eff + u;
-    }
-
-    if (log_flag == 1) {
-      y_eff = log(y_eff);
-    }
-  }
-
-  vector[m-1] dtau;
-  for (q in 1:(m-1)) dtau[q] = tau_q[q+1] - tau_q[q];
-
-
-}
-
-model {
-
-  u ~ beta(1, 1);
-  // --- Priors ---
-  to_vector(z_incr) ~ normal(0, 1);
-  tau_rw ~ student_t(3, 0, base_scale/10);
-  mu0 ~ normal(0, 2 * base_scale);
-
-  if (p > 0) to_vector(beta) ~ normal(0, 1);
-
-  //sigma_q ~ student_t(3, 0, c_sigma * base_scale);
-
-  // ----- σ-aware score using Z = [X | H] with logit smoothing -----
-  {
-    if (pr > 0) {
-      matrix[pr, m] S;
-      for (q in 1:m) {
-        vector[pr] s_q = rep_vector(0.0, pr);
-        for (i in 1:n) {
-          // Linear predictor uses separate beta (for X) and gamma (for H)
-          real xb = (p > 0) ? dot_product(to_vector(row(X, i)), to_vector(beta[q])) : 0;
-          real hb = (r > 0) ? dot_product(to_vector(row(H, i)), to_vector(gamma[q])) : 0;
-
-          real eta = mu[q, i] + xb + hb + offset[i];
-          real r_i = y_eff[i] - eta;
-
-          // smoothed indicator: I(r<0) ≈ inv_logit( -r / smooth_T )
-          real z  = fmin(20, fmax(-20, -r_i / smooth_T));
-          real Ilt = inv_logit(z);
-          real psi = tau_q[q] - Ilt;
-
-          if (p > 0) s_q[1:p]      += to_vector(row(X, i)) * (psi);
-          if (r > 0) s_q[(p+1):pr] += to_vector(row(H, i)) * (psi);
-
-        }
-        S[, q] = s_q;
-      }
-
-      // Q_sigma = D^{-1} Q D^{-1}, D = diag(sigma_q)
-      //matrix[m, m] Q_sigma;
-      //{
-      //  vector[m] invsig = 1;
-      //  matrix[m, m] Dinv = diag_matrix(invsig);
-      //  Q_sigma = Dinv * Q * Dinv;
-      //  for (k in 1:m) Q_sigma[k,k] = Q_sigma[k,k] + 1e-10;
-      //}
-      //matrix[m, m] L_Q = cholesky_decompose(Q_sigma);
-      matrix[m, m] L_Q = cholesky_decompose(Q);
-
-      // A = L_Gs^{-1} S   (pr x m)
-      // B = L_Q^{-1} A'   (m x pr)
-      matrix[pr, m] A = mdivide_left_tri_low(L_Gs, S);
-      matrix[m, pr] B = mdivide_left_tri_low(L_Q, A');
-
-      target += -0.5 * dot_self(to_vector(B)) / n;
-    }
-  }
-
-  // ----- Bayesian adaptive LASSO for gamma (Park & Casella, 2008) -----
-  // gamma_{qj} | tau_{qj} ~ Normal(0, sqrt(tau_{qj}))
-  // tau_{qj} ~ Exponential( (lambda_lasso2 * w_gamma[q,j])^2 / 2 )
-  {
-    //// 1) local variances
-    //for (q in 1:m)
-    //  for (j in 1:r)
-    //    tau_gamma[q, j] ~ exponential(0.5 * square(lambda_lasso2 * w_gamma[q, j]));
-  //
-    //// 2) conditional normals
-    //// Stan's normal() takes SD; use sqrt(tau) as the SD
-    //for (q in 1:m)
-    //  for (j in 1:r)
-    //    gamma[q, j] ~ normal(0, sqrt(tau_gamma[q, j]));
-  //
-    //// 3) weakly informative prior on lambda_lasso2
-    //// (you can tune this—smaller mean => stronger shrinkage => more sensitivity)
-    //lambda_lasso2 ~ lognormal(log(1.0), 0.7);
-
-    // global shrinkage (you already had this)
-    lambda_lasso2 ~ gamma(lambda_lasso2_a, lambda_lasso2_b);
-
-    // group scales per H column (j = 1..r)
-    for (j in 1:r) {
-      tau_gamma_group[j] ~ gamma( (m + 1) / 2, 0.5 * lambda_lasso2 );
-    }
-
-    // coefficients, sharing the column-wise scale
-    for (j in 1:r) {
-      for (q in 1:m) {
-        gamma[q, j] ~ normal(0, sqrt(tau_gamma_group[j]));
-      }
-    }
-
-  }
-
-
-
-
-  // ---- Non-crossing penalty ----
-  {
-    real pen = 0;
-    for (i in 1:n) {
-      for (q in 1:(m-1)) {
-        real eta_q =
-            mu[q, i]
-          + ((p>0)? dot_product(to_vector(row(X,i)), to_vector(beta[q])) : 0)
-          + ((r>0)? dot_product(to_vector(row(H,i)), to_vector(gamma[q])) : 0)
-          + offset[i];
-        real eta_q1 =
-            mu[q+1, i]
-          + ((p>0)? dot_product(to_vector(row(X,i)), to_vector(beta[q+1])) : 0)
-          + ((r>0)? dot_product(to_vector(row(H,i)), to_vector(gamma[q+1])) : 0)
-          + offset[i];
-
-        real dfdtau = (eta_q1 - eta_q) / dtau[q];   // finite-diff ∂τ f
-        pen += fmax(0, -dfdtau);                    // L1 hinge on negative derivative
-      }
-    }
-    pen /= (n * (m - 1));       // empirical average over i and adjacent τ-intervals
-    target += - penalty_c * pen; // Stan maximizes ⇒ subtract the positive penalty
-  }
-
-  // Jacobian adjustment
-
-  if (log_flag == 1) {
-    if (jittering == 1) {
-      target += -sum(log(y + u));
-    } else {
-      target += -sum(log(y));
-    }
-
-
-  }
-
-}
-
-"
-
-
 #' Smoothed Quantile Regression with Group-Lasso Shrinkage (Stan)
 #'
 #' Fits a multi-quantile (\eqn{m}) regression model where the conditional
@@ -397,6 +130,277 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
                      chains = 1, iter = 1500, warmup = 500,
                      control = NULL,
                      seed = 123, verbose = FALSE) {
+
+
+
+  stan_code <- "data {
+      int<lower=1> n;                  // observations
+      int<lower=0> p;                  // predictors in eta (X)
+      int<lower=2> m;                  // quantiles
+      int<lower=0> r;                  // predictors in eta (H) — can be 0
+
+      matrix[n, p] X;                  // n x p
+      matrix[n, r] H;                  // n x r  (new)
+      vector[n] y;
+      vector[n] offset;
+      vector[m] tau_q;
+
+      real<lower=1e-12> base_scale;
+      real<lower=0>      c_sigma;
+
+      real<lower=0> penalty_c;
+
+      real T_rel;                  // smoothing temperature (dimensionless, learned upstream)
+
+
+      // Adaptive LASSO for gamma
+      //matrix[m, r] w_gamma;           // weights >= 0 (element-wise, or make it vector[r] if shared)
+      //real<lower=0> lambda_lasso2;     // global L1 penalty level
+
+      real<lower=0> lambda_lasso2_a;
+      real<lower=0> lambda_lasso2_b;
+
+      real<lower=0, upper = 1> jittering;
+      real<lower=0, upper = 1> log_flag;
+
+    }
+
+    transformed data {
+      // Quantile kernel Q[a,b] = min(tau_a, tau_b) - tau_a * tau_b
+      matrix[m, m] Q;
+      for (a in 1:m)
+        for (b in 1:m)
+          Q[a, b] = fmin(tau_q[a], tau_q[b]) - tau_q[a] * tau_q[b];
+
+      // ----- Build combined design Z = [X | H] (n x pr) -----
+      int pr = p + r;
+      matrix[n, pr] Z;
+      {
+        // Fill X columns (if any)
+        for (j in 1:p)
+          for (i in 1:n)
+            Z[i, j] = X[i, j];
+
+        // Fill H columns (if any)
+        for (j in 1:r)
+          for (i in 1:n)
+            Z[i, p + j] = H[i, j];
+      }
+
+      // ----- Gram for score: Gs = Z'Z / n and its Cholesky -----
+      matrix[pr, pr] Gs;
+      matrix[pr, pr] L_Gs;
+      if (pr > 0) {
+        matrix[pr, n] Zt = Z';
+        Gs = (Zt * Z) / n;
+        for (k in 1:pr) Gs[k, k] = Gs[k, k] + 1e-8;  // tiny ridge
+        L_Gs = cholesky_decompose(Gs);
+      } else {
+        Gs   = rep_matrix(0, 0, 0);
+        L_Gs = rep_matrix(0, 0, 0);
+      }
+    }
+
+
+    parameters {
+      // Random-walk increments (non-centered)
+      matrix[m, n-1] z_incr;
+      vector<lower=0>[m] tau_rw;
+      vector[m]       mu0;
+
+      // X-coefficients (simple Normal prior, as in your code)
+      matrix[m, p] beta;
+
+      // KEEP gamma as the actual coefficients:
+      //matrix[m, r] gamma;
+
+      // Bayesian LASSO local scales (variance parameters)
+      //matrix<lower=0>[m, r] tau_gamma;          // element-wise local variances
+
+      matrix[m, r] gamma;
+      vector<lower=0>[r] tau_gamma_group;   // one per H column
+
+      // Global LASSO rate (λ > 0); you can put prior on λ or on log λ
+      real<lower=0> lambda_lasso2;
+
+
+      // per-quantile scale carried in score
+      //real<lower=1e-12> sigma_q;
+
+      vector<lower=1e-12, upper = 1>[n] u;
+    }
+
+    transformed parameters {
+      // RW paths
+      matrix[m, n] mu;
+      for (q in 1:m) {
+        mu[q,1] = mu0[q];
+        for (t in 2:n)
+          mu[q,t] = mu[q,t-1] + tau_rw[q] * z_incr[q,t-1];
+      }
+
+      // Smoothing temperature on data scale
+      real<lower=1e-12> smooth_T = base_scale * T_rel;
+
+      vector[n] y_eff;
+      y_eff = y;
+
+      {
+
+        if (jittering == 1) {
+          y_eff = y_eff + u;
+        }
+
+        if (log_flag == 1) {
+          y_eff = log(y_eff);
+        }
+      }
+
+      vector[m-1] dtau;
+      for (q in 1:(m-1)) dtau[q] = tau_q[q+1] - tau_q[q];
+
+
+    }
+
+    model {
+
+      u ~ beta(1, 1);
+      // --- Priors ---
+      to_vector(z_incr) ~ normal(0, 1);
+      tau_rw ~ student_t(3, 0, base_scale/10);
+      mu0 ~ normal(0, 2 * base_scale);
+
+      if (p > 0) to_vector(beta) ~ normal(0, 1);
+
+      //sigma_q ~ student_t(3, 0, c_sigma * base_scale);
+
+      // ----- σ-aware score using Z = [X | H] with logit smoothing -----
+      {
+        if (pr > 0) {
+          matrix[pr, m] S;
+          for (q in 1:m) {
+            vector[pr] s_q = rep_vector(0.0, pr);
+            for (i in 1:n) {
+              // Linear predictor uses separate beta (for X) and gamma (for H)
+              real xb = (p > 0) ? dot_product(to_vector(row(X, i)), to_vector(beta[q])) : 0;
+              real hb = (r > 0) ? dot_product(to_vector(row(H, i)), to_vector(gamma[q])) : 0;
+
+              real eta = mu[q, i] + xb + hb + offset[i];
+              real r_i = y_eff[i] - eta;
+
+              // smoothed indicator: I(r<0) ≈ inv_logit( -r / smooth_T )
+              real z  = fmin(20, fmax(-20, -r_i / smooth_T));
+              real Ilt = inv_logit(z);
+              real psi = tau_q[q] - Ilt;
+
+              if (p > 0) s_q[1:p]      += to_vector(row(X, i)) * (psi);
+              if (r > 0) s_q[(p+1):pr] += to_vector(row(H, i)) * (psi);
+
+            }
+            S[, q] = s_q;
+          }
+
+          // Q_sigma = D^{-1} Q D^{-1}, D = diag(sigma_q)
+          //matrix[m, m] Q_sigma;
+          //{
+          //  vector[m] invsig = 1;
+          //  matrix[m, m] Dinv = diag_matrix(invsig);
+          //  Q_sigma = Dinv * Q * Dinv;
+          //  for (k in 1:m) Q_sigma[k,k] = Q_sigma[k,k] + 1e-10;
+          //}
+          //matrix[m, m] L_Q = cholesky_decompose(Q_sigma);
+          matrix[m, m] L_Q = cholesky_decompose(Q);
+
+          // A = L_Gs^{-1} S   (pr x m)
+          // B = L_Q^{-1} A'   (m x pr)
+          matrix[pr, m] A = mdivide_left_tri_low(L_Gs, S);
+          matrix[m, pr] B = mdivide_left_tri_low(L_Q, A');
+
+          target += -0.5 * dot_self(to_vector(B)) / n;
+        }
+      }
+
+      // ----- Bayesian adaptive LASSO for gamma (Park & Casella, 2008) -----
+      // gamma_{qj} | tau_{qj} ~ Normal(0, sqrt(tau_{qj}))
+      // tau_{qj} ~ Exponential( (lambda_lasso2 * w_gamma[q,j])^2 / 2 )
+      {
+        //// 1) local variances
+        //for (q in 1:m)
+        //  for (j in 1:r)
+        //    tau_gamma[q, j] ~ exponential(0.5 * square(lambda_lasso2 * w_gamma[q, j]));
+      //
+        //// 2) conditional normals
+        //// Stan's normal() takes SD; use sqrt(tau) as the SD
+        //for (q in 1:m)
+        //  for (j in 1:r)
+        //    gamma[q, j] ~ normal(0, sqrt(tau_gamma[q, j]));
+      //
+        //// 3) weakly informative prior on lambda_lasso2
+        //// (you can tune this—smaller mean => stronger shrinkage => more sensitivity)
+        //lambda_lasso2 ~ lognormal(log(1.0), 0.7);
+
+        // global shrinkage (you already had this)
+        lambda_lasso2 ~ gamma(lambda_lasso2_a, lambda_lasso2_b);
+
+        // group scales per H column (j = 1..r)
+        for (j in 1:r) {
+          tau_gamma_group[j] ~ gamma( (m + 1) / 2, 0.5 * lambda_lasso2 );
+        }
+
+        // coefficients, sharing the column-wise scale
+        for (j in 1:r) {
+          for (q in 1:m) {
+            gamma[q, j] ~ normal(0, sqrt(tau_gamma_group[j]));
+          }
+        }
+
+      }
+
+
+
+
+      // ---- Non-crossing penalty ----
+      {
+        real pen = 0;
+        for (i in 1:n) {
+          for (q in 1:(m-1)) {
+            real eta_q =
+                mu[q, i]
+              + ((p>0)? dot_product(to_vector(row(X,i)), to_vector(beta[q])) : 0)
+              + ((r>0)? dot_product(to_vector(row(H,i)), to_vector(gamma[q])) : 0)
+              + offset[i];
+            real eta_q1 =
+                mu[q+1, i]
+              + ((p>0)? dot_product(to_vector(row(X,i)), to_vector(beta[q+1])) : 0)
+              + ((r>0)? dot_product(to_vector(row(H,i)), to_vector(gamma[q+1])) : 0)
+              + offset[i];
+
+            real dfdtau = (eta_q1 - eta_q) / dtau[q];   // finite-diff ∂τ f
+            pen += fmax(0, -dfdtau);                    // L1 hinge on negative derivative
+          }
+        }
+        pen /= (n * (m - 1));       // empirical average over i and adjacent τ-intervals
+        target += - penalty_c * pen; // Stan maximizes ⇒ subtract the positive penalty
+      }
+
+      // Jacobian adjustment
+
+      if (log_flag == 1) {
+        if (jittering == 1) {
+          target += -sum(log(y + u));
+        } else {
+          target += -sum(log(y));
+        }
+
+
+      }
+
+    }
+
+  "
+
+
+
   n <- length(y)
   m <- length(taus)
 
