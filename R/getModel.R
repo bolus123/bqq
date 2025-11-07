@@ -386,7 +386,7 @@ model {
 #'
 #' @seealso \code{\link[rstan]{sampling}}, \code{\link[rstan]{stan_model}}
 #'
-#' @importFrom rstan stan_model sampling
+#' @importFrom rstan stan_model sampling stan
 #' @importFrom stats lm resid sd
 #' @export
 getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
