@@ -4,14 +4,12 @@
 \alias{getEta}
 \title{Reconstruct posterior linear predictors \eqn{\eta} from a stanfit}
 \usage{
-getEta(fit, H, w, X = NULL, log_flag = 0, jittering = 0, offset = NULL)
+getEta(fit, H = NULL, X = NULL, log_flag = 0, jittering = 0, offset = NULL)
 }
 \arguments{
 \item{fit}{A fitted \code{rstan::stanfit} from \code{\link{getModel}}.}
 
 \item{H}{Numeric matrix \eqn{n \times r} used in the fit (same ordering as during fitting).}
-
-\item{w}{Integer \(\ge 1\). Length of the initial step column \code{X0} (first \code{w} rows are 1).}
 
 \item{X}{Optional numeric matrix of additional predictors (\eqn{n \times p_x}).
 If supplied, \code{X0} is prepended; if \code{NULL}, \code{X} is just \code{X0}.}
@@ -24,6 +22,8 @@ to mimic any integer-valued response post-processing used during fitting.}
 
 \item{offset}{Optional numeric vector of length \eqn{n} added to \eqn{\eta}.
 Defaults to zeros.}
+
+\item{w}{Integer \(\ge 1\). Length of the initial step column \code{X0} (first \code{w} rows are 1).}
 }
 \value{
 A list with two 3D arrays, each of dimension

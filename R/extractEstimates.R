@@ -123,7 +123,7 @@ extractGamma <- function(fit, side = "two.sided") {
 #' @seealso \code{\link{getModel}}, \code{\link{extractGamma}}
 #' @importFrom rstan extract
 #' @export
-getEta <- function(fit, H, w, X = NULL, log_flag = 0, jittering = 0, offset = NULL) {
+getEta <- function(fit, H = NULL, X = NULL, log_flag = 0, jittering = 0, offset = NULL) {
 
   post <- rstan::extract(fit)
 
@@ -137,11 +137,14 @@ getEta <- function(fit, H, w, X = NULL, log_flag = 0, jittering = 0, offset = NU
     beta_draws <- NULL
   }
 
-  if ("gamma" %in% names(post)) {
-    gamma_draws <- post$gamma
-  } else {
-    gamma_draws <- NULL
+  if (!is.null(H)) {
+    if ("gamma" %in% names(post)) {
+      gamma_draws <- post$gamma
+    } else {
+      gamma_draws <- NULL
+    }
   }
+
 
   # dimensions
   n_iter <- dim(mu_draws)[1]
@@ -172,8 +175,12 @@ getEta <- function(fit, H, w, X = NULL, log_flag = 0, jittering = 0, offset = NU
       # add predictors if present
       if (!is.null(beta_draws)) {
         xb <- if (!is.null(beta_draws)) as.vector(X %*% beta_draws[s, q, ]) else 0
-        hg <- if (!is.null(gamma_draws)) as.vector(H %*% gamma_draws[s, q, ]) else 0
-        eta_draws[s, q, ] <- eta_draws[s, q, ] + hg
+        eta_draws[s, q, ] <- eta_draws[s, q, ] + xb
+        if (!is.null(H)) {
+          hg <- if (!is.null(gamma_draws)) as.vector(H %*% gamma_draws[s, q, ]) else 0
+        } else {
+          hg <- 0
+        }
         eta_draws1[s, q, ] <- eta_draws1[s, q, ] + xb + hg
       }
     }
