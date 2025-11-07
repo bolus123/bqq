@@ -7,10 +7,10 @@
 getModel(
   y,
   taus,
-  H,
-  w,
+  H = NULL,
   X = NULL,
   offset = NULL,
+  w = 0,
   alpha = 0.75,
   eps_w = 0.001,
   c_sigma = 1,
@@ -37,16 +37,16 @@ getModel(
 \item{H}{Numeric matrix \eqn{n \times r} of structured predictors for group-lasso
 coefficients \eqn{\gamma}. If \eqn{r = 0}, pass a zero-column matrix.}
 
-\item{w}{Integer \eqn{\ge 1}. Creates an intercept-like column \code{X0} with the
-first \code{w} entries set to 1 and the rest 0 (e.g., a pre-period indicator),
-which is then included in \code{X}.}
-
 \item{X}{Optional numeric matrix \eqn{n \times p_x} of additional predictors.
 If supplied, \code{X0} (defined by \code{w}) is prepended as the first column.
 If \code{NULL} (default), \code{X} consists only of \code{X0}.}
 
 \item{offset}{Optional numeric vector of length \eqn{n} added to the linear predictor.
 Defaults to 0.}
+
+\item{w}{Integer \eqn{\ge 1}. Creates an intercept-like column \code{X0} with the
+first \code{w} entries set to 1 and the rest 0 (e.g., a pre-period indicator),
+which is then included in \code{X}.}
 
 \item{alpha, eps_w}{Reserved for future adaptive LASSO weights; currently unused
 (weight construction code is commented out).}

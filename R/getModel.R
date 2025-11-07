@@ -123,7 +123,7 @@
 #' @importFrom rstan stan_model sampling stan
 #' @importFrom stats lm resid sd
 #' @export
-getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
+getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
                      alpha = 0.75, eps_w = 1e-3, c_sigma = 1.0,
                      penalty_c = 10, penalty_curv_c = 10, T_rel = 0.1,
                      lambda_lasso2_a = 1, lambda_lasso2_b = 1,
@@ -455,15 +455,28 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
 
   p <- ncol(X)
 
-  r <- ncol(H)
 
-  # Standardize H (and orthogonalize against X if p>0 to reduce competition)
-  if (p > 0 && r > 0) {
-    H_ortho <- apply(H, 2, function(col) resid(lm(col ~ X)))
-    Hs <- scale(H_ortho, center = TRUE, scale = TRUE)
+  # -- H handling (must set both r and H) ---------------------------------------
+  if (is.null(H)) {
+    r <- 0
+    H <- matrix(0, n, 0)        # n x 0 matrix for Stan
   } else {
-    Hs <- scale(H, center = TRUE, scale = TRUE)
+    r <- ncol(H)
+    if (r == 0) {
+      H <- matrix(0, n, 0)      # just in case a 0-col matrix was passed
+    } else {
+      # Standardize H; if X present, orthogonalize H against X first
+      if (p > 0) {
+        H_ortho <- apply(H, 2, function(col) resid(stats::lm(col ~ X)))
+        Hs <- scale(H_ortho, center = TRUE, scale = TRUE)
+      } else {
+        Hs <- scale(H, center = TRUE, scale = TRUE)
+      }
+      H <- Hs                    # <--- IMPORTANT: use the processed H
+    }
   }
+  # ------------------------------------------------------------------------------
+
 
   # Pilot estimate for gamma (per-quantile or pooled). Easiest: ridge on H (per quantile):
   # alpha <- 0.75               # adaptive exponent (0.5..1)
