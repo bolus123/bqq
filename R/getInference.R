@@ -195,7 +195,7 @@ getChisq <- function(eta, differences = 0, w = 0, method = "holm", alternative =
 #'
 #' @importFrom stats pchisq p.adjust
 #' @export
-getChisq_boostrapped <- function(eta, eta0, differences = 0, w = 0, method = "holm", alternative = "two.sided", nsim = 1000) {
+getChisq_boostrap <- function(eta, eta0, differences = 0, w = 0, method = "holm", alternative = "two.sided", nsim = 1000) {
 
   nnsim <- nsim
 
@@ -203,7 +203,7 @@ getChisq_boostrapped <- function(eta, eta0, differences = 0, w = 0, method = "ho
   m <- dim(eta)[2]
   t <- dim(eta)[3]
 
-  chisq_boostrapped0 <- matrix(NA, nrow = nsim, ncol = t - differences)
+  chisq_boostrapped0 <- matrix(NA, nrow = nnsim, ncol = t - differences)
 
   for (sim in 1:nnsim) {
     ind <- sample(1:nsim, nsim, replace = TRUE)

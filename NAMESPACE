@@ -3,7 +3,7 @@
 export(extractGamma)
 export(gamma_pval)
 export(getChisq)
-export(getChisq_boostrapped)
+export(getChisq_boostrap)
 export(getEta)
 export(getIsolatedShift)
 export(getModel)
