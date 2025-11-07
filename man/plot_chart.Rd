@@ -13,6 +13,7 @@ plot_chart(
   q99,
   pval_chisq_adj,
   differences = 0,
+  w = 0,
   FAP0 = 0.05
 )
 }

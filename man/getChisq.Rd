@@ -4,7 +4,13 @@
 \alias{getChisq}
 \title{Global chi-square tests across quantiles over time}
 \usage{
-getChisq(eta, differences = 0, method = "holm", alternative = "two.sided")
+getChisq(
+  eta,
+  differences = 0,
+  w = 0,
+  method = "holm",
+  alternative = "two.sided"
+)
 }
 \arguments{
 \item{eta}{3D numeric array \code{[iterations, m, t]} of posterior draws for

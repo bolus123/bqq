@@ -271,7 +271,7 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       u ~ beta(1, 1);
       // --- Priors ---
       to_vector(z_incr) ~ normal(0, 1);
-      tau_rw ~ student_t(3, 0, base_scale/10);
+      tau_rw ~ student_t(3, 0, base_scale/3);
       mu0 ~ normal(mu0_init, 2 * base_scale);
 
       if (p > 0) to_vector(beta) ~ normal(0, 1);
@@ -496,13 +496,19 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
   ## Scale weights so median is 1 (helps interpret lambda_lasso2):
   #w_gamma <- w_gamma / median(w_gamma)
 
-  base_scale <- max(1e-8, sd(y))
+  base_scale <- max(1e-8, 1.4826 * mad(y))
+
+  if (w > 0) {
+    mu0_init = quantile(y[1:w], probs = taus)
+  } else {
+    mu0_init = quantile(y, probs = taus)
+  }
 
   stan_data <- list(
     n = n, p = p, m = m, r = r,
     X = X, H = H,
     y = y, offset = offset, tau_q = taus,
-    mu0_init = quantile(y, probs = taus),
+    mu0_init = mu0_init,
     base_scale = base_scale, c_sigma = c_sigma,
     penalty_c = penalty_c, penalty_curv_c = penalty_curv_c, T_rel = T_rel,
     lambda_lasso2_a = lambda_lasso2_a, lambda_lasso2_b = lambda_lasso2_b,

@@ -43,7 +43,7 @@
 #'
 #' @importFrom stats pchisq p.adjust
 #' @export
-getChisq <- function(eta, differences = 0, method = "holm", alternative = "two.sided") {
+getChisq <- function(eta, differences = 0, w = 0, method = "holm", alternative = "two.sided") {
 
   nsim <- dim(eta)[1]
   m <- dim(eta)[2]
@@ -125,169 +125,29 @@ getChisq <- function(eta, differences = 0, method = "holm", alternative = "two.s
   }
 
 
-
-  out <- list(
-    chisq = out,
-    pvalue = out_pval,
-    adjpvalue = p.adjust(out_pval, method),
-    differences = differences
-  )
-
-  out
-
-}
-
-
-
-#' Component-wise normal tests across quantiles over time
-#'
-#' Performs standardized component-wise tests for each quantile/time pair by
-#' whitening the vector contrasts with the pooled covariance (via matrix square
-#' root inverse) and converting to normal p-values, with multiple-testing
-#' adjustment.
-#'
-#' @inheritParams getChisq
-#'
-#' @details
-#' For \code{differences = 0}, let \eqn{\Sigma} be the pooled covariance across time.
-#' Using \eqn{\Sigma^{-1/2}}, the per-time, per-quantile standardized contrasts are
-#' \eqn{z_{q,i} = [\Sigma^{-1/2}(\bar{\eta}_{\cdot,i} - \bar{\eta}_{\cdot,\cdot})]_q}.
-#' These \eqn{z}-scores are converted to p-values (two- or one-sided) and adjusted
-#' with \code{p.adjust(method)}. For \code{differences > 0}, the same is applied to
-#' the \code{differences}-order differences of \eqn{\eta}.
-#'
-#' @return A list with:
-#' \describe{
-#'   \item{\code{norm}}{Matrix \code{m x t} (or \code{m x (t - differences)}) of
-#'     standardized values.}
-#'   \item{\code{pvalue}}{Matrix of unadjusted p-values, same dimension as \code{norm}.}
-#'   \item{\code{adjpvalue}}{Matrix of adjusted p-values.}
-#'   \item{\code{differences}}{The input \code{differences}.}
-#' }
-#'
-#' @examples
-#' \dontrun{
-#'   infN <- getNorm(eta, differences = 1, method = "BH")
-#'   which(infN$adjpvalue < 0.1, arr.ind = TRUE)
-#' }
-#'
-#' @importFrom pracma sqrtm
-#' @importFrom stats pnorm p.adjust
-#' @export
-getNorm <- function(eta, differences = 0, method = "holm", alternative = "two.sided") {
-
-  nsim <- dim(eta)[1]
-  m <- dim(eta)[2]
-  t <- dim(eta)[3]
-
-  if (differences == 0) {
-
-    gm <- apply(eta, 2, mean)
-
-    samp_cov <- matrix(0, nrow = m, ncol = m)
-
-    for (i in 1:t) {
-      tmp_samp_cov <- ((t(eta[, , i]) - gm)) %*% t(t(eta[, , i]) - gm) / (nsim - 1)
-      samp_cov <- samp_cov + tmp_samp_cov
-
-    }
-    samp_cov <- samp_cov  / t
-
-    {
-      invsamp_cov_sqrtm <- pracma::sqrtm(samp_cov)$Binv
-
-      dm <- apply(eta, c(2, 3), mean)
-      dm <- dm - gm
-
-      out <- matrix(NA, nrow = m, ncol = t)
-
-      for (i in 1:t) {
-        tmp <- dm[, i]
-        out[, i] <- invsamp_cov_sqrtm %*% as.numeric(tmp)
-
-      }
-
-      out_pval1 <- pnorm(as.numeric(out))
-      out_pval2 <- 1 - pnorm(as.numeric(out))
-
-      if (alternative == "two.sided") {
-        out_pval0 <- 2 * apply(cbind(out_pval1, out_pval2), 1, min)
-      } else if (alternative == "less") {
-        out_pval0 <- out_pval1
-      } else if (alternative == "greater") {
-        out_pval0 <- out_pval2
-      }
-
-      adjpvalue <- p.adjust(out_pval0, method)
-      adjpvalue <- matrix(adjpvalue, nrow = m)
-
-      out_pval <- matrix(out_pval0, nrow = m)
-
-    }
-
-
-  } else if (differences > 0) {
-
-    tmp_eta <- array(NA, c(nsim, m, t - differences))
-
-    for (j in 1:m) {
-      tmp_eta[, j, ] <- t(diff(t(eta[, j, ]), differences = differences))
-    }
-
-    samp_cov <- matrix(0, nrow = m, ncol = m)
-
-    for (i in 1:(t - differences)) {
-      tmp_samp_cov <- ((t(tmp_eta[, , i]))) %*% t(t(tmp_eta[, , i])) / (nsim - 1)
-      samp_cov <- samp_cov + tmp_samp_cov
-
-    }
-    samp_cov <- samp_cov  / (t - differences)
-
-    {
-      invsamp_cov_sqrtm <- pracma::sqrtm(samp_cov)$Binv
-
-      dm <- apply(tmp_eta, c(2, 3), mean)
-
-      out <- matrix(NA, nrow = m, ncol = (t - differences))
-
-      for (i in 1:(t - differences)) {
-        tmp <- dm[, i]
-        out[, i] <- invsamp_cov_sqrtm %*% as.numeric(tmp)
-
-      }
-
-      out_pval1 <- pnorm(as.numeric(out))
-      out_pval2 <- 1 - pnorm(as.numeric(out))
-
-      if (alternative == "two.sided") {
-        out_pval0 <- 2 * apply(cbind(out_pval1, out_pval2), 1, min)
-      } else if (alternative == "less") {
-        out_pval0 <- out_pval1
-      } else if (alternative == "greater") {
-        out_pval0 <- out_pval2
-      }
-
-      adjpvalue <- p.adjust(out_pval0, method)
-      adjpvalue <- matrix(adjpvalue, nrow = m)
-
-      out_pval <- matrix(out_pval0, nrow = m)
-
-    }
-
+  if (w > 0) {
+    out <- list(
+      chisq = out[-c(1:w)],
+      pvalue = out_pval[-c(1:w)],
+      adjpvalue = p.adjust(out_pval[-c(1:w)], method),
+      differences = differences,
+      w = w
+    )
+  } else {
+    out <- list(
+      chisq = out,
+      pvalue = out_pval,
+      adjpvalue = p.adjust(out_pval, method),
+      differences = differences,
+      w = w
+    )
   }
 
 
-
-  out <- list(
-    norm = out,
-    pvalue = out_pval,
-    adjpvalue = adjpvalue,
-    differences = differences
-  )
-
   out
 
 }
+
 
 
 #' Location–scale–skew–kurtosis from five quantiles
@@ -353,7 +213,7 @@ lssk <- function(q1, q25, q50, q75, q99) {
 #' @importFrom graphics plot points abline
 #' @export
 plot_chart <- function(y, q1, q25, q50, q75, q99,
-                       pval_chisq_adj, differences = 0, FAP0 = 0.05) {
+                       pval_chisq_adj, differences = 0, w = 0, FAP0 = 0.05) {
 
   lssk_tmp <- lssk(q1, q25, q50, q75, q99)
 
@@ -371,7 +231,7 @@ plot_chart <- function(y, q1, q25, q50, q75, q99,
   points(1:n, apply(q75, 2, median), type = 'l', lty = 2, col = 'blue')
   points(1:n, apply(q99, 2, median), type = 'l', lty = 2, col = 'blue')
 
-  abline(v = which(pval_chisq_adj <= FAP0) - 0.5 + differences, lty = 2, col = 'red')
+  abline(v = which(pval_chisq_adj <= FAP0) - 0.5 + differences + w, lty = 2, col = 'red')
 
 }
 
