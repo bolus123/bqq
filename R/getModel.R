@@ -205,7 +205,7 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
     parameters {
       // Random-walk increments (non-centered)
       matrix[m, n-1] z_incr;
-      vector<lower=0>[m] tau_rw;
+      //vector<lower=0>[m] tau_rw;
       vector[m]       mu0;
 
       // X-coefficients (simple Normal prior, as in your code)
@@ -236,7 +236,8 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
       for (q in 1:m) {
         mu[q,1] = mu0[q];
         for (t in 2:n)
-          mu[q,t] = mu[q,t-1] + tau_rw[q] * z_incr[q,t-1];
+          //mu[q,t] = mu[q,t-1] + tau_rw[q] * z_incr[q,t-1];
+          mu[q,t] = mu[q,t-1] + z_incr[q,t-1];
       }
 
       // Smoothing temperature on data scale
@@ -267,7 +268,7 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
       u ~ beta(1, 1);
       // --- Priors ---
       to_vector(z_incr) ~ normal(0, 1);
-      tau_rw ~ student_t(3, 0, base_scale/10);
+      //tau_rw ~ student_t(3, 0, base_scale/10);
       mu0 ~ normal(0, 2 * base_scale);
 
       if (p > 0) to_vector(beta) ~ normal(0, 1);
