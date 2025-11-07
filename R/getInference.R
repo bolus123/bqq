@@ -205,8 +205,8 @@ getChisq_boostrapped <- function(eta, eta0, differences = 0, w = 0, method = "ho
 
   chisq_boostrapped0 <- matrix(NA, nrow = nsim, ncol = t)
 
-  for (sim in 1:nsim) {
-    ind <- sample(1:nsim, nnsim, replace = TRUE)
+  for (sim in 1:nnsim) {
+    ind <- sample(1:nsim, nsim, replace = TRUE)
 
     eta0_tmp <- eta0[ind, , ]
 
