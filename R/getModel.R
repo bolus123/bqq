@@ -459,11 +459,11 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
     log_flag = log_flag, jittering = jittering
   )
 
-  sm <- stan_model(model_code = stan_code)
+  #sm <- stan_model(model_code = stan_code)
 
 
   fit <- suppressWarnings(stan(
-    sm, data = stan_data,
+    model_code = stan_code, data = stan_data,
     chains = chains, iter = iter, warmup = warmup,
     control = control,
     seed = seed,
