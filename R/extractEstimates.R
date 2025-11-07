@@ -176,12 +176,12 @@ getEta <- function(fit, H = NULL, X = NULL, log_flag = 0, jittering = 0, offset 
       if (!is.null(beta_draws)) {
         xb <- if (!is.null(beta_draws)) as.vector(X %*% beta_draws[s, q, ]) else 0
         eta_draws[s, q, ] <- eta_draws[s, q, ] + xb
-        if (!is.null(H)) {
-          hg <- if (!is.null(gamma_draws)) as.vector(H %*% gamma_draws[s, q, ]) else 0
-        } else {
-          hg <- 0
-        }
-        eta_draws1[s, q, ] <- eta_draws1[s, q, ] + xb + hg
+        eta_draws1[s, q, ] <- eta_draws1[s, q, ] + xb
+      }
+
+      if (!is.null(H)) {
+        hg <- if (!is.null(gamma_draws)) as.vector(H %*% gamma_draws[s, q, ]) else 0
+        eta_draws1[s, q, ] <- eta_draws1[s, q, ] + hg
       }
     }
   }
