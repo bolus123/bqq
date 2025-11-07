@@ -24,7 +24,8 @@ getModel(
   iter = 1500,
   warmup = 500,
   control = NULL,
-  seed = 123
+  seed = 123,
+  verbose = FALSE
 )
 }
 \arguments{
@@ -75,6 +76,8 @@ and include Jacobian.}
 \item{control}{Optional list passed to \code{rstan::sampling()} (e.g., \code{adapt\_delta}).}
 
 \item{seed}{RNG seed.}
+
+\item{verbose}{show the log.}
 }
 \value{
 An object of class \code{rstan::stanfit} containing posterior draws for

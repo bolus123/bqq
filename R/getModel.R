@@ -337,6 +337,7 @@ model {
 #' @param warmup Warmup iterations per chain.
 #' @param control Optional list passed to \code{rstan::sampling()} (e.g., \code{adapt\_delta}).
 #' @param seed RNG seed.
+#' @param verbose show the log.
 #'
 #' @details
 #' Internally, \code{H} is standardized (column-wise) and, if \code{p > 0}, first orthogonalized
