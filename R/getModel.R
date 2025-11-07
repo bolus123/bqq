@@ -57,6 +57,7 @@
 #' @param c_sigma Nonnegative scalar controlling the (currently disabled) per-quantile
 #'   scale prior; kept for compatibility.
 #' @param penalty_c Positive scalar weight for the non-crossing penalty (larger is stricter).
+#' @param penalty_curv_c Positive scalar weight for the curvature of the non-crossing penalty (larger is stricter).
 #' @param T_rel Positive scalar “smoothing temperature” (dimensionless). The actual
 #'   smoothing scale is \code{base_scale * T_rel}, where \code{base_scale = sd(y)}.
 #' @param lambda_lasso2_a,lambda_lasso2_b Positive shape/rate hyperparameters for the
@@ -124,7 +125,7 @@
 #' @export
 getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
                      alpha = 0.75, eps_w = 1e-3, c_sigma = 1.0,
-                     penalty_c = 10, T_rel = 0.1,
+                     penalty_c = 10, penalty_curv_c = 10, T_rel = 0.1,
                      lambda_lasso2_a = 1, lambda_lasso2_b = 1,
                      log_flag = 0, jittering = 0,
                      chains = 1, iter = 1500, warmup = 500,
@@ -150,6 +151,7 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
       real<lower=0>      c_sigma;
 
       real<lower=0> penalty_c;
+      real<lower=0> penalty_curv_c;      // weight of curvature penalty
 
       real T_rel;                  // smoothing temperature (dimensionless, learned upstream)
 
@@ -385,6 +387,38 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
         target += - penalty_c * pen; // Stan maximizes ⇒ subtract the positive penalty
       }
 
+      // ----- Curvature (second-difference) penalty across τ -----
+      {
+        real pen_curv = 0;
+
+        for (i in 1:n) {
+          // you can precompute eta[q] into a small local vector to avoid recomputing dot products
+          vector[m] eta_row;
+          for (q in 1:m) {
+            real xb = (p > 0) ? dot_product(to_vector(row(X, i)), to_vector(beta[q])) : 0;
+            real hb = (r > 0) ? dot_product(to_vector(row(H, i)), to_vector(gamma[q])) : 0;
+            eta_row[q] = mu[q, i] + xb + hb + offset[i];
+          }
+
+          for (q in 2:(m-1)) {
+            real dtL = tau_q[q]   - tau_q[q-1];         // Δτ_{q-1}
+            real dtR = tau_q[q+1] - tau_q[q];           // Δτ_q
+
+            // non-uniform second derivative approximation:
+            real d1 = (eta_row[q]   - eta_row[q-1]) / dtL;
+            real d2 = (eta_row[q+1] - eta_row[q])   / dtR;
+            real curv = 2.0 * (d2 - d1) / (dtL + dtR);  // ≈ f''(τ_q)
+
+            // scale and (optional) tail emphasis weight
+            pen_curv += square(curv);   // quadratic; swap for Huber if preferred
+          }
+        }
+
+        pen_curv /= (n * (m - 2));  // normalize
+        target += - penalty_curv_c * pen_curv;
+      }
+
+
       // Jacobian adjustment
 
       if (log_flag == 1) {
@@ -457,7 +491,7 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
     y = y, offset = offset, tau_q = taus,
     mu0_init = quantile(y, probs = taus),
     base_scale = base_scale, c_sigma = c_sigma,
-    penalty_c = penalty_c, T_rel = T_rel,
+    penalty_c = penalty_c, penalty_curv_c = penalty_curv_c, T_rel = T_rel,
     lambda_lasso2_a = lambda_lasso2_a, lambda_lasso2_b = lambda_lasso2_b,
     log_flag = log_flag, jittering = jittering
   )

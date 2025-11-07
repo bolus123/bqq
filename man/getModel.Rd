@@ -15,6 +15,7 @@ getModel(
   eps_w = 0.001,
   c_sigma = 1,
   penalty_c = 10,
+  penalty_curv_c = 10,
   T_rel = 0.1,
   lambda_lasso2_a = 1,
   lambda_lasso2_b = 1,
@@ -54,6 +55,8 @@ Defaults to 0.}
 scale prior; kept for compatibility.}
 
 \item{penalty_c}{Positive scalar weight for the non-crossing penalty (larger is stricter).}
+
+\item{penalty_curv_c}{Positive scalar weight for the curvature of the non-crossing penalty (larger is stricter).}
 
 \item{T_rel}{Positive scalar “smoothing temperature” (dimensionless). The actual
 smoothing scale is \code{base_scale * T_rel}, where \code{base_scale = sd(y)}.}
