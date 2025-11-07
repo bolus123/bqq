@@ -365,11 +365,11 @@ plot_chart <- function(y, q1, q25, q50, q75, q99,
   points((1:n), y)
 
 
-  points(1:n, apply(q1 , 2, median), type = 'l', lty = 2)
-  points(1:n, apply(q25, 2, median), type = 'l', lty = 2)
-  points(1:n, apply(q50, 2, median), type = 'l', lty = 2)
-  points(1:n, apply(q75, 2, median), type = 'l', lty = 2)
-  points(1:n, apply(q99, 2, median), type = 'l', lty = 2)
+  points(1:n, apply(q1 , 2, median), type = 'l', lty = 2, col = 'blue')
+  points(1:n, apply(q25, 2, median), type = 'l', lty = 2, col = 'blue')
+  points(1:n, apply(q50, 2, median), type = 'l', lty = 2, col = 'blue')
+  points(1:n, apply(q75, 2, median), type = 'l', lty = 2, col = 'blue')
+  points(1:n, apply(q99, 2, median), type = 'l', lty = 2, col = 'blue')
 
   abline(v = which(pval_chisq_adj <= FAP0) - 0.5 + differences, lty = 2, col = 'red')
 
