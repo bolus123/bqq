@@ -395,7 +395,7 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
                      log_flag = 0, jittering = 0,
                      chains = 1, iter = 1500, warmup = 500,
                      control = NULL,
-                     seed = 123) {
+                     seed = 123, verbose = FALSE) {
   n <- length(y)
   m <- length(taus)
 
@@ -457,11 +457,12 @@ getModel <- function(y, taus, H, w, X = NULL, offset = NULL,
   sm <- stan_model(model_code = stan_code)
 
 
-  fit <- suppressWarnings(sampling(
+  fit <- suppressWarnings(stan(
     sm, data = stan_data,
     chains = chains, iter = iter, warmup = warmup,
     control = control,
-    seed = seed
+    seed = seed,
+    verbose = verbose
   ))
 
 }
