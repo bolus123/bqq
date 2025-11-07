@@ -203,7 +203,7 @@ getChisq_boostrapped <- function(eta, eta0, differences = 0, w = 0, method = "ho
   m <- dim(eta)[2]
   t <- dim(eta)[3]
 
-  chisq_boostrapped0 <- matrix(NA, nrow = nsim, ncol = t)
+  chisq_boostrapped0 <- matrix(NA, nrow = nsim, ncol = t - differences)
 
   for (sim in 1:nnsim) {
     ind <- sample(1:nsim, nsim, replace = TRUE)
@@ -357,7 +357,7 @@ getChisq_boostrapped <- function(eta, eta0, differences = 0, w = 0, method = "ho
 
   chisq_vec <- out
   out_pval <- rep(NA, length(chisq_vec))
-  for (i in 1:t) {
+  for (i in 1:(t - differences)) {
     out_pval[i] <- mean(chisq_boostrapped0[, i] > chisq_vec[i])
   }
 
