@@ -56,8 +56,12 @@
 #'   (weight construction code is commented out).
 #' @param c_sigma Nonnegative scalar controlling the (currently disabled) per-quantile
 #'   scale prior; kept for compatibility.
+#' @param beta_sd Positive scalar prior std dev for \code{beta} coefficients (default 1.0).
 #' @param penalty_c Positive scalar weight for the non-crossing penalty (larger is stricter).
 #' @param penalty_curv_c Positive scalar weight for the curvature of the non-crossing penalty (larger is stricter).
+#' @param curvature_p Exponent for the curvature penalty (default 2 for L2; set >1 for other norms). With m quantiles,
+#'   let dtL = tau_q - tau_{q-1}, dtR = tau_{q+1} - tau_q, d1 = (eta_q - eta_{q-1})/dtL, d2 = (eta_{q+1} - eta_q)/dtR,
+#'   curv = (d2 - d1)/((dtL+dtR)/2). The penalty accumulates |curv|^p * ((dtL+dtR)/2) over q=2..m-1, averaged over n(m-2).
 #' @param T_rel Positive scalar “smoothing temperature” (dimensionless). The actual
 #'   smoothing scale is \code{base_scale * T_rel}, where \code{base_scale = sd(y)}.
 #' @param lambda_lasso2_a,lambda_lasso2_b Positive shape/rate hyperparameters for the
@@ -125,39 +129,44 @@
 #' @export
 getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
                      alpha = 0.75, eps_w = 1e-3, c_sigma = 1.0,
-                     penalty_c = 10, penalty_curv_c = 10, T_rel = 0.1,
+                     beta_sd = 1.0,
+                     penalty_c = 10, penalty_curv_c = 5, curvature_p = 1, T_rel = 0.1,
                      lambda_lasso2_a = 1, lambda_lasso2_b = 1,
                      log_flag = 0, jittering = 0,
                      chains = 1, iter = 1500, warmup = 500,
                      control = NULL,
                      seed = 123, verbose = FALSE,
+                     fit_method = c("map_then_sampling", "sampling", "map"),
                      prior_gamma = c("group_lasso", "lasso", "spike_slab",
-                                     "hetero_group_lasso", "adaptive_lasso"),
+                                     "het_group_lasso", "adaptive_lasso"),
                      # spike-and-slab hyperparameters
                      spike_sd = 0.05, slab_sd = 2.0,
                      slab_pi_a = 1, slab_pi_b = 1) {
 
   prior_gamma <- match.arg(prior_gamma)
+  fit_method  <- match.arg(fit_method)
   prior_code <- switch(
     prior_gamma,
     group_lasso        = 1L,
     lasso              = 2L,
     spike_slab         = 3L,
-    hetero_group_lasso = 4L,
+    het_group_lasso = 4L,
     adaptive_lasso     = 5L
   )
 
   safe_gamma_weights <- function(y, H, tau, alpha, eps_w, lambda_lasso = NULL) {
-    # First try the default 'br' solver
+    r <- ncol(H)
+    if (r == 0) return(numeric(0))
+
+    # First try a more stable solver and silence non-unique warnings
     fit_q <- try(
-      quantreg::rq(y ~ H, tau = tau, method = "br"),
+      suppressWarnings(quantreg::rq(y ~ H - 1, tau = tau, method = "fn")),
       silent = TRUE
     )
 
     if (inherits(fit_q, "try-error")) {
-      # If 'br' fails, fall back to lasso
+      # If 'fn' fails, fall back to lasso
       n <- length(y)
-      r <- ncol(H)
 
       if (is.null(lambda_lasso)) {
         # simple heuristic for lambda (you can replace with your favorite)
@@ -165,19 +174,24 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       }
 
       fit_q <- try(
-        quantreg::rq(y ~ H, tau = tau,
-                     method = "lasso", lambda = lambda_lasso),
+        suppressWarnings(
+          quantreg::rq(y ~ H - 1, tau = tau,
+                       method = "lasso", lambda = lambda_lasso)
+        ),
         silent = TRUE
       )
 
       if (inherits(fit_q, "try-error")) {
-        warning("Both rq(method = 'br') and rq(method = 'lasso') failed; using w = 1 for this tau.")
+        warning("Both rq(method = 'fn') and rq(method = 'lasso') failed; using w = 1 for this tau.")
         return(rep(1, r))
       }
     }
 
-    # Extract pilot gamma_hat (drop intercept)
-    gamma_hat <- as.numeric(stats::coef(fit_q))[-1]
+    gamma_hat <- as.numeric(stats::coef(fit_q))
+    if (length(gamma_hat) != r) {
+      warning("Pilot quantile fit returned a length mismatch; using w = 1 for this tau.")
+      return(rep(1, r))
+    }
 
     # Adaptive weight: (|hat| + eps_w)^(-alpha)
     (abs(gamma_hat) + eps_w)^(-alpha)
@@ -201,9 +215,11 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
 
       real<lower=1e-12> base_scale;
       real<lower=0>      c_sigma;
+      real<lower=0>      beta_sd;
 
       real<lower=0> penalty_c;
       real<lower=0> penalty_curv_c;
+      real<lower=1> curvature_p;
 
       real T_rel;                      // smoothing temperature (dimensionless)
 
@@ -333,12 +349,12 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       mu0 ~ normal(mu0_init, 2 * base_scale);
 
       // beta prior
-      if (p > 0) to_vector(beta) ~ normal(0, 1);
+      if (p > 0) to_vector(beta) ~ normal(0, beta_sd);
 
       // ----- Score-based likelihood using Z = [X | H] with logit smoothing -----
       {
         if ((p + r) > 0) {
-          int pr = p + r;
+          //int pr = p + r;
           matrix[pr, m] S;
 
           for (q in 1:m) {
@@ -433,33 +449,9 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         }
       }
 
-      // ---- Non-crossing penalty (L1 hinge on negative finite-diff derivative) ----
+      // ---- Non-crossing penalty and curvature penalty ----
       {
         real pen = 0;
-        for (i in 1:n) {
-          for (q in 1:(m-1)) {
-            real eta_q =
-                mu[q, i]
-              + ((p>0)? dot_product(to_vector(row(X,i)), to_vector(beta[q])) : 0)
-              + ((r>0)? dot_product(to_vector(row(H,i)), to_vector(gamma[q])) : 0)
-              + offset[i];
-
-            real eta_q1 =
-                mu[q+1, i]
-              + ((p>0)? dot_product(to_vector(row(X,i)), to_vector(beta[q+1])) : 0)
-              + ((r>0)? dot_product(to_vector(row(H,i)), to_vector(gamma[q+1])) : 0)
-              + offset[i];
-
-            real dfdtau = (eta_q1 - eta_q) / dtau[q];
-            pen += fmax(0, -dfdtau);
-          }
-        }
-        pen /= (n * (m - 1));
-        target += - penalty_c * pen;
-      }
-
-      // ----- Curvature (second-difference) penalty across tau -----
-      {
         real pen_curv = 0;
 
         for (i in 1:n) {
@@ -470,20 +462,38 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
             eta_row[q] = mu[q, i] + xb + hb + offset[i];
           }
 
-          for (q in 2:(m-1)) {
-            real dtL = tau_q[q]   - tau_q[q-1];
-            real dtR = tau_q[q+1] - tau_q[q];
+          // ---- Non-crossing penalty
+          for (q in 1:(m-1)) {
+            real dfdtau = (eta_row[q + 1] - eta_row[q]) / dtau[q];
+            pen += fmax(0, -dfdtau);
+          }
 
-            real d1 = (eta_row[q]   - eta_row[q-1]) / dtL;
-            real d2 = (eta_row[q+1] - eta_row[q])   / dtR;
-            real curv = 2.0 * (d2 - d1) / (dtL + dtR);
+          // ----- Curvature penalty (accumulate curvature across time)
+          if (m > 2) {
+            for (q in 2:(m-1)) {
+              real dtL = tau_q[q]   - tau_q[q-1];
+              real dtR = tau_q[q+1] - tau_q[q];
 
-            pen_curv += square(curv);
+              real d1 = (eta_row[q]   - eta_row[q-1]) / dtL;
+              real d2 = (eta_row[q+1] - eta_row[q])   / dtR;
+              real curv = (d2 - d1) / ((dtL + dtR) / 2);
+
+              // accumulate |curv|^p per (i,q)
+              pen_curv += pow(fabs(curv), curvature_p);
+            }
           }
         }
 
-        pen_curv /= (n * (m - 2));
-        target += - penalty_curv_c * pen_curv;
+        // ---- Non-crossing penalty
+        pen /= (n * (m - 1));
+        target += - penalty_c * pen;
+
+        // ----- Curvature penalty: mean |curv|^p over i,q, Lp norm
+        if (m > 2) {
+          pen_curv /= (n * (m - 2));
+          pen_curv = pow(pen_curv, 1.0 / curvature_p);
+          target += - penalty_curv_c * pen_curv;
+        }
       }
 
       // Jacobian adjustment for log transform
@@ -507,10 +517,11 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
   }
 
   # X0: pre-period indicator
-  X0 <- matrix(0, nrow = n, ncol = 1)
-  if (w > 0) {
-    X0[1:w, ] <- 1
-  }
+  #X0 <- matrix(0, nrow = n, ncol = 1)
+  #if (w > 0) {
+  #  X0[1:w, ] <- 1
+  #}
+  X0 <- matrix(1, nrow = n, ncol = 1)
 
   if (is.null(X)) {
     X <- X0
@@ -552,9 +563,9 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
   # default: all ones
   w_gamma <- matrix(1, nrow = m, ncol = r)
 
-  if (r > 0 && prior_gamma %in% c("hetero_group_lasso", "adaptive_lasso")) {
+  if (r > 0 && prior_gamma %in% c("het_group_lasso", "adaptive_lasso")) {
     if (!requireNamespace("quantreg", quietly = TRUE)) {
-      stop("Package 'quantreg' is required for hetero_group_lasso / adaptive_lasso weights.")
+      stop("Package 'quantreg' is required for het_group_lasso / adaptive_lasso weights.")
     }
 
     for (q in seq_len(m)) {
@@ -583,8 +594,8 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     X = X, H = H,
     y = y, offset = offset, tau_q = taus,
     mu0_init = as.vector(mu0_init),
-    base_scale = base_scale, c_sigma = c_sigma,
-    penalty_c = penalty_c, penalty_curv_c = penalty_curv_c, T_rel = T_rel,
+    base_scale = base_scale, c_sigma = c_sigma, beta_sd = beta_sd,
+    penalty_c = penalty_c, penalty_curv_c = penalty_curv_c, curvature_p = curvature_p, T_rel = T_rel,
     lambda_lasso2_a = lambda_lasso2_a, lambda_lasso2_b = lambda_lasso2_b,
     log_flag = log_flag, jittering = jittering,
     prior_code = prior_code,
@@ -595,14 +606,57 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     slab_pi_b = slab_pi_b
   )
 
-  fit <- suppressWarnings(
-    rstan::stan(
-      model_code = stan_code, data = stan_data,
-      chains = chains, iter = iter, warmup = warmup,
-      control = control, seed = seed, verbose = verbose
+  # Compile Stan model once
+  sm <- rstan::stan_model(model_code = stan_code)
+
+  # Always obtain a MAP estimate first
+  if ((fit_method == "map_then_sampling") | (fit_method == "map")) {
+    map_fit <- {
+      opt_args <- list(
+        object = sm,
+        data = stan_data,
+        hessian = TRUE,
+        as_vector = FALSE,
+        seed = seed,
+        verbose = verbose
+      )
+      # rstan::optimizing does not accept 'control' in some versions; only add if non-null and recognized
+      # old: control = control
+      suppressWarnings(do.call(rstan::optimizing, opt_args))
+    }
+    hessian <- map_fit$hessian
+  } else {
+    map_fit <- NULL
+    hessian <- NULL
+  }
+  
+
+  if (fit_method == "map_then_sampling") {
+    init_theta <- map_fit$par  # constrained params
+    fit <- suppressWarnings(
+      rstan::sampling(
+        sm, data = stan_data,
+        chains = chains, iter = iter, warmup = warmup,
+        init = function() init_theta, init_r = 0.01,
+        control = control, seed = seed, verbose = verbose
+      )
     )
+  } else if (fit_method == "sampling") {
+    fit <- suppressWarnings(
+      rstan::sampling(
+        sm, data = stan_data,
+        chains = chains, iter = iter, warmup = warmup,
+        control = control, seed = seed, verbose = verbose
+      )
+    )
+  } else { # map only
+    fit <- NULL
+  }
+
+  list(
+    fit = fit,
+    map = map_fit,
+    y = y, H = H, X = X,
+    hessian = hessian
   )
-
-  fit
 }
-
