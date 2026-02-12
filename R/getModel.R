@@ -1,14 +1,12 @@
-#' Smoothed Quantile Regression with Group-Lasso Shrinkage (Stan)
+#' Smoothed Quantile Regression with Interquantile Shrinkage (Stan)
 #'
 #' Fits a multi-quantile (\eqn{m}) regression model where the conditional
 #' quantile function is modeled as a latent random walk in time (or index)
 #' with optional fixed effects \eqn{X} and structured effects \eqn{H}.
 #' The \eqn{H}-coefficients are shrunk via a **grouped Bayesian LASSO**
 #' (column-wise sharing across quantiles), and adjacent quantiles are softly
-#' penalized to discourage crossings. The likelihood is optimized using a
-#' **smoothed score** (logit-smoothed indicator) with temperature
-#' \code{T_rel * base_scale}. The model is implemented in Stan and estimated
-#' via MCMC using \strong{rstan}.
+#' penalized to discourage crossings. **Interquantile shrinkage** stabilizes
+#' outer quantiles by penalizing differences between adjacent quantile coefficients.
 #'
 #' @section Model (high level):
 #' \describe{
@@ -19,24 +17,17 @@
 #'       \item \eqn{\mu_{q,\cdot}} is a random walk per quantile: \eqn{\mu_{q,t} = \mu_{q,t-1} + \tau^{(rw)}_q z_{q,t-1}}.
 #'     }
 #'   }
-#'   \item{Score objective}{
-#'     Uses the logit-smoothed check-function derivative
-#'     \eqn{\psi_{qi} = \tau_q - \mathrm{logit}^{-1}(-r_{qi}/(T_{\text{rel}} \cdot \text{base\_scale}))}
-#'     with a quadratic form based on the quantile kernel \eqn{Q} and the Gram of \eqn{[X|H]}.
-#'   }
-#'   \item{Shrinkage on \eqn{\gamma}}{
-#'     Column-wise grouped Bayesian LASSO:
-#'     \eqn{\gamma_{qj} \sim \mathcal{N}(0, \sqrt{\tau_{\gamma,j}})},\quad
-#'     \eqn{\tau_{\gamma,j} \sim \mathrm{Gamma}((m+1)/2,\ 0.5\,\lambda)},\quad
-#'     \eqn{\lambda \sim \mathrm{Gamma}(\texttt{lambda\_lasso2\_a},\ \texttt{lambda\_lasso2\_b})}.
+#'   \item{Interquantile shrinkage}{
+#'     Penalizes differences between adjacent quantile coefficients for gamma and beta slopes:
+#'     \eqn{\text{pen}_{\text{IQ}} = \sum_{q=2}^m w_q (|\gamma_{q} - \gamma_{q-1}| + |\beta_{q}^{slope} - \beta_{q-1}^{slope}|)}
+#'     where \eqn{w_q = 1/\sqrt{\tau_q(1-\tau_q)\tau_{q-1}(1-\tau_{q-1})}} gives more weight to outer quantiles.
+#'     This stabilizes outer quantiles by borrowing strength from inner quantiles.
+#'     Note: Intercept is NOT penalized (per Jiang, Wang, & Bondell 2013).
+#'     Note: mu (random walk) is NOT penalized to allow quantile-specific temporal evolution.
 #'   }
 #'   \item{Non-crossing penalty}{
 #'     Adds an L1 hinge on the finite-difference derivative in \eqn{\tau},
-#'     scaled by \code{penalty_c}.
-#'   }
-#'   \item{Optional transforms}{
-#'     \code{jittering = 1} adds \eqn{u \sim \mathrm{Beta}(1,1)} to \eqn{y};
-#'     \code{log\_flag = 1} fits the model on \eqn{\log(y + u)} and includes the Jacobian.
+#'     scaled by \code{lambda_nc}.
 #'   }
 #' }
 #'
@@ -44,104 +35,90 @@
 #' @param taus Numeric vector of target quantile levels in \eqn{(0,1)}, length \eqn{m}.
 #' @param H Numeric matrix \eqn{n \times r} of structured predictors for group-lasso
 #'   coefficients \eqn{\gamma}. If \eqn{r = 0}, pass a zero-column matrix.
-#' @param w Integer \eqn{\ge 1}. Creates an intercept-like column \code{X0} with the
-#'   first \code{w} entries set to 1 and the rest 0 (e.g., a pre-period indicator),
-#'   which is then included in \code{X}.
+#' @param w Integer \eqn{\ge 1}. Used for initial quantile estimation from first w observations.
 #' @param X Optional numeric matrix \eqn{n \times p_x} of additional predictors.
-#'   If supplied, \code{X0} (defined by \code{w}) is prepended as the first column.
-#'   If \code{NULL} (default), \code{X} consists only of \code{X0}.
 #' @param offset Optional numeric vector of length \eqn{n} added to the linear predictor.
-#'   Defaults to 0.
-#' @param alpha,eps_w Reserved for future adaptive LASSO weights; currently unused
-#'   (weight construction code is commented out).
-#' @param c_sigma Nonnegative scalar controlling the (currently disabled) per-quantile
-#'   scale prior; kept for compatibility.
 #' @param beta_sd Positive scalar prior std dev for \code{beta} coefficients (default 1.0).
-#' @param penalty_c Positive scalar weight for the non-crossing penalty (larger is stricter).
-#' @param penalty_curv_c Positive scalar weight for the curvature of the non-crossing penalty (larger is stricter).
-#' @param curvature_p Exponent for the curvature penalty (default 2 for L2; set >1 for other norms). With m quantiles,
-#'   let dtL = tau_q - tau_{q-1}, dtR = tau_{q+1} - tau_q, d1 = (eta_q - eta_{q-1})/dtL, d2 = (eta_{q+1} - eta_q)/dtR,
-#'   curv = (d2 - d1)/((dtL+dtR)/2). The penalty accumulates |curv|^p * ((dtL+dtR)/2) over q=2..m-1, averaged over n(m-2).
-#' @param T_rel Positive scalar “smoothing temperature” (dimensionless). The actual
-#'   smoothing scale is \code{base_scale * T_rel}, where \code{base_scale = sd(y)}.
+#' @param lambda_nc Positive scalar weight for the non-crossing penalty (larger is stricter).
+#' @param adaptive_iq Logical; if TRUE (default), the IQ shrinkage rate lambda_iq2
+#'   is learned from data via a Gamma prior. If FALSE, lambda_iq2_fixed is used.
+#' @param lambda_iq2_a,lambda_iq2_b Positive shape/rate hyperparameters for the
+#'   IQ shrinkage rate \eqn{\lambda_{iq}^2} (used when adaptive_iq = TRUE).
+#'   Prior: \eqn{\lambda_{iq}^2 \sim \mathrm{Gamma}(a, b)}, mean = a/b.
+#'   Effective penalty weight is \eqn{\sqrt{\lambda_{iq}^2}}.
+#' @param lambda_iq2_fixed Positive scalar; fixed value for \eqn{\lambda_{iq}^2} when
+#'   adaptive_iq = FALSE (default 1). Effective penalty = \eqn{\sqrt{\lambda_{iq2\_fixed}}}.
+#' @param T_rel Positive scalar "smoothing temperature" (dimensionless).
 #' @param lambda_lasso2_a,lambda_lasso2_b Positive shape/rate hyperparameters for the
-#'   global LASSO rate \eqn{\lambda}.
-#' @param log_flag Integer \code{0/1}. If 1, fit on \code{log(y)} (with optional jitter)
-#'   and include Jacobian.
-#' @param jittering Integer \code{0/1}. If 1, add \eqn{u \sim \mathrm{Beta}(1,1)} to \eqn{y}
-#'   (or inside the log if \code{log_flag = 1}) to mitigate ties / boundary issues.
-#' @param chains Number of MCMC chains (passed to \code{rstan::sampling()}).
+#'   global LASSO rate \eqn{\lambda} (used when adaptive_gamma = TRUE).
+#' @param adaptive_gamma Logical; if TRUE (default), the global LASSO rate lambda_lasso2
+#'   is learned from data via a Gamma prior. If FALSE, lambda_lasso2_fixed is used as a fixed value.
+#' @param lambda_lasso2_fixed Positive scalar; fixed value for global LASSO rate when
+#'   adaptive_gamma = FALSE (default 1).
+#' @param log_flag Integer \code{0/1}. If 1, fit on \code{log(y)}.
+#' @param jittering Integer \code{0/1}. If 1, add \eqn{u \sim \mathrm{Beta}(1,1)} to \eqn{y}.
+#' @param chains Number of MCMC chains.
 #' @param iter Total iterations per chain.
 #' @param warmup Warmup iterations per chain.
-#' @param control Optional list passed to \code{rstan::sampling()} (e.g., \code{adapt\_delta}).
+#' @param control Optional list passed to \code{rstan::sampling()}.
 #' @param seed RNG seed.
 #' @param verbose show the log.
+#' @param map_hessian Logical; if \code{TRUE} compute Hessian in MAP step.
+#' @param map_tol_obj,map_tol_grad,map_tol_rel_grad,map_tol_param MAP optimizer tolerances.
+#' @param map_iter Maximum iterations for MAP optimization.
+#' @param fit_method One of "mcmc", "map_mcmc", or "map":
+#'   \itemize{
+#'     \item "mcmc": Estimators are posterior median from MCMC; posterior draws from MCMC.
+#'     \item "map_mcmc": Estimators are MAP; posterior draws from MCMC (MAP used as init).
+#'     \item "map": Estimators are MAP; posterior draws from Laplacian approximation.
+#'   }
+#' @param laplace_n_samples Number of samples for Laplacian approximation (when fit_method = "map").
+#' @param laplace_noise_scale Scale factor for parameter perturbation in Laplacian approximation.
+#' @param prior_gamma Prior type for gamma: "group_lasso", "lasso", "spike_slab", "het_group_lasso", "adaptive_lasso".
+#' @param spike_sd,slab_sd,slab_pi_a,slab_pi_b Spike-and-slab hyperparameters.
 #'
-#' @details
-#' Internally, \code{H} is standardized (column-wise) and, if \code{p > 0}, first orthogonalized
-#' against the columns of \code{X} to reduce competition. The Gram matrix of
-#' \code{Z = [X | H]} is computed once for scoring, with a tiny ridge for numerical stability.
+#' @return A list with components:
+#'   \itemize{
+#'     \item fit: stanfit object (NULL if fit_method = "map")
+#'     \item map: MAP estimates (contains $par with parameter values)
+#'     \item y, H, X: Input data and design matrices
+#'     \item hessian: Hessian at MAP (if computed)
+#'     \item fit_method: The estimation method used
+#'     \item laplace_samples: Pre-generated Laplacian samples (if fit_method = "map")
+#'   }
 #'
-#' The function constructs a \code{stan\_model} from the embedded \code{stan\_code} string and
-#' then runs \code{rstan::sampling()}. By default, only the group-LASSO hierarchy is active; the
-#' element-wise adaptive-LASSO section is present but commented out in the Stan program.
-#'
-#' @return An object of class \code{rstan::stanfit} containing posterior draws for
-#'   \eqn{\mu}, \eqn{\beta}, \eqn{\gamma}, \eqn{\tau^{(rw)}}, \eqn{\lambda}, group variances,
-#'   and other latent quantities used in the smoothed score.
-#'
-#' @section Convergence & diagnostics:
-#' Inspect R-hat, effective sample sizes, and divergences (increase \code{adapt\_delta}
-#' and/or \code{iter} as needed). Because the likelihood is based on a smoothed score,
-#' \code{T_rel} can materially affect mixing and sharpness of the posterior.
-#'
-#' @examples
-#' \dontrun{
-#'   set.seed(1)
-#'   n   <- 100
-#'   m   <- 3
-#'   tau <- c(0.25, 0.5, 0.75)
-#'
-#'   # Design
-#'   w <- 20
-#'   X <- cbind(rnorm(n))          # one extra covariate (X0 is added automatically)
-#'   H <- cbind(rnorm(n), rnorm(n))# two structured columns for group-lasso
-#'   off <- rep(0, n)
-#'
-#'   # Data (toy)
-#'   f  <- 0.3 * (1:n)/n + 0.5 * X[,1] - 0.7 * H[,1] + 0.2 * H[,2]
-#'   y  <- f + rnorm(n, 0, 0.3)
-#'
-#'   fit <- getModel(
-#'     y = y, taus = tau, H = H, w = w, X = X, offset = off,
-#'     chains = 2, iter = 1000, warmup = 500, seed = 123
-#'   )
-#'
-#'   print(fit, pars = c("lambda_lasso2", "tau_gamma_group"))
-#'   # posterior summaries for gamma (H-coefficients) by quantile:
-#'   # rstan::summary(fit, pars = "gamma")$summary
-#' }
-#'
-#' @seealso \code{\link[rstan]{sampling}}, \code{\link[rstan]{stan_model}}
+#' @references
+#' Jiang, L., Wang, H. J., & Bondell, H. D. (2013). Interquantile Shrinkage in Regression Models.
+#' Journal of Computational and Graphical Statistics, 22(4), 970-986.
 #'
 #' @importFrom rstan stan_model sampling stan
 #' @importFrom stats lm resid sd
 #' @export
 getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
-                     alpha = 0.75, eps_w = 1e-3, c_sigma = 1.0,
-                     beta_sd = 1.0,
-                     penalty_c = 10, penalty_curv_c = 5, curvature_p = 1, T_rel = 0.1,
-                     lambda_lasso2_a = 1, lambda_lasso2_b = 1,
-                     log_flag = 0, jittering = 0,
-                     chains = 1, iter = 1500, warmup = 500,
-                     control = NULL,
-                     seed = 123, verbose = FALSE,
-                     fit_method = c("map_then_sampling", "sampling", "map"),
-                     prior_gamma = c("group_lasso", "lasso", "spike_slab",
-                                     "het_group_lasso", "adaptive_lasso"),
-                     # spike-and-slab hyperparameters
-                     spike_sd = 0.05, slab_sd = 2.0,
-                     slab_pi_a = 1, slab_pi_b = 1) {
+                        alpha = 0.75, eps_w = 1e-3, c_sigma = 1.0,
+                        beta_sd = 1.0,
+                        lambda_nc = 2, T_rel = 0.1,
+                        adaptive_iq = TRUE,
+                        lambda_iq2_a = 1, lambda_iq2_b = 0.1,
+                        lambda_iq2_fixed = 1,
+                        adaptive_gamma = TRUE,
+                        lambda_lasso2_a = 1, lambda_lasso2_b = 0.05,
+                        lambda_lasso2_fixed = 1,
+                        log_flag = 0, jittering = 0,
+                        chains = 1, iter = 1500, warmup = 500,
+                        control = list(adapt_delta = 0.99),
+                        seed = 123, verbose = FALSE,
+                        map_hessian = TRUE,
+                        map_tol_obj = 1e-12, map_tol_grad = 1e-8,
+                        map_tol_rel_grad = 1e4, map_tol_param = 1e-8,
+                        map_iter = 2000,
+                        fit_method = c("mcmc", "map_mcmc", "map"),
+                        laplace_n_samples = 1000,
+                        laplace_noise_scale = 0.1,
+                        prior_gamma = c("group_lasso", "lasso", "spike_slab",
+                                        "het_group_lasso", "adaptive_lasso"),
+                        spike_sd = 0.05, slab_sd = 2.0,
+                        slab_pi_a = 1, slab_pi_b = 1) {
 
   prior_gamma <- match.arg(prior_gamma)
   fit_method  <- match.arg(fit_method)
@@ -150,7 +127,7 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     group_lasso        = 1L,
     lasso              = 2L,
     spike_slab         = 3L,
-    het_group_lasso = 4L,
+    het_group_lasso    = 4L,
     adaptive_lasso     = 5L
   )
 
@@ -158,21 +135,16 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     r <- ncol(H)
     if (r == 0) return(numeric(0))
 
-    # First try a more stable solver and silence non-unique warnings
     fit_q <- try(
       suppressWarnings(quantreg::rq(y ~ H - 1, tau = tau, method = "fn")),
       silent = TRUE
     )
 
     if (inherits(fit_q, "try-error")) {
-      # If 'fn' fails, fall back to lasso
       n <- length(y)
-
       if (is.null(lambda_lasso)) {
-        # simple heuristic for lambda (you can replace with your favorite)
         lambda_lasso <- sqrt(log(r + 1L) / n)
       }
-
       fit_q <- try(
         suppressWarnings(
           quantreg::rq(y ~ H - 1, tau = tau,
@@ -180,7 +152,6 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         ),
         silent = TRUE
       )
-
       if (inherits(fit_q, "try-error")) {
         warning("Both rq(method = 'fn') and rq(method = 'lasso') failed; using w = 1 for this tau.")
         return(rep(1, r))
@@ -192,8 +163,6 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       warning("Pilot quantile fit returned a length mismatch; using w = 1 for this tau.")
       return(rep(1, r))
     }
-
-    # Adaptive weight: (|hat| + eps_w)^(-alpha)
     (abs(gamma_hat) + eps_w)^(-alpha)
   }
 
@@ -217,24 +186,25 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       real<lower=0>      c_sigma;
       real<lower=0>      beta_sd;
 
-      real<lower=0> penalty_c;
-      real<lower=0> penalty_curv_c;
-      real<lower=1> curvature_p;
+      real<lower=0> lambda_nc;         // non-crossing penalty weight
+
+      // Interquantile (fused lasso) shrinkage
+      real<lower=0> lambda_iq2_a;      // Gamma prior shape for lambda_iq^2 (when adaptive_iq = 1)
+      real<lower=0> lambda_iq2_b;      // Gamma prior rate  for lambda_iq^2 (when adaptive_iq = 1)
+      int<lower=0, upper=1> adaptive_iq;  // 1 = data-adaptive, 0 = fixed
+      real<lower=0> lambda_iq2_fixed;  // fixed value for lambda_iq^2 when adaptive_iq = 0
 
       real T_rel;                      // smoothing temperature (dimensionless)
 
       real<lower=0> lambda_lasso2_a;
       real<lower=0> lambda_lasso2_b;
+      int<lower=0, upper=1> adaptive_gamma;      // 1 = data-adaptive, 0 = fixed
+      real<lower=0> lambda_lasso2_fixed;         // fixed value when adaptive_gamma = 0
 
       real<lower=0, upper = 1> jittering;
       real<lower=0, upper = 1> log_flag;
 
-      // prior selector:
-      // 1 = group lasso
-      // 2 = lasso (w_gamma all 1)
-      // 3 = spike-slab
-      // 4 = heterogeneous group lasso with Lévy mixing
-      // 5 = adaptive lasso (same as 2, but w_gamma from data)
+      // prior selector
       int<lower=1, upper=5> prior_code;
 
       // weights for lasso / adaptive lasso / hetero group lasso
@@ -279,12 +249,26 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         Gs   = rep_matrix(0, 0, 0);
         L_Gs = rep_matrix(0, 0, 0);
       }
+
+      // Precompute interquantile shrinkage weights: w_iq[q] for q = 2,...,m
+      // Weight = 1 / sqrt(tau_q * (1-tau_q) * tau_{q-1} * (1-tau_{q-1}))
+      // This gives MORE weight (more shrinkage) to outer quantiles
+      vector[m-1] w_iq_vec;
+      for (q in 2:m) {
+        real var_q   = tau_q[q] * (1 - tau_q[q]);
+        real var_qm1 = tau_q[q-1] * (1 - tau_q[q-1]);
+        w_iq_vec[q-1] = 1.0 / sqrt(var_q * var_qm1);
+      }
+      // Normalize so median weight is 1
+      real w_iq_median = w_iq_vec[(m-1) / 2 + 1];
+      for (q in 1:(m-1)) {
+        w_iq_vec[q] = w_iq_vec[q] / w_iq_median;
+      }
   }
 
   parameters {
       // Random-walk increments (non-centered)
-      matrix[m, n-1] z_incr;
-      vector<lower=0>[m] tau_rw;
+      // z_incr and tau_rw removed: mu[q,t] = mu[q,t-1] = mu0[q]
       vector[m]       mu0;
 
       // X-coefficients
@@ -299,13 +283,16 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       // Element-wise local scales for lasso/adaptive lasso
       matrix<lower=0>[m, r] tau_gamma;
 
-      // Global LASSO rate
+      // Global LASSO rate (learned when adaptive_gamma = 1)
       real<lower=0> lambda_lasso2;
+
+      // IQ shrinkage rate squared (learned when adaptive_iq = 1)
+      real<lower=0> lambda_iq2;
 
       // Spike-and-slab mixing weight
       real<lower=0, upper=1> pi_slab;
 
-      // Group-level mixer for hetero group lasso (Lévy)
+      // Group-level mixer for hetero group lasso (Levy)
       vector<lower=0>[m] omega_group;
 
       // jitter variable
@@ -318,7 +305,7 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       for (q in 1:m) {
         mu[q,1] = mu0[q];
         for (t in 2:n)
-          mu[q,t] = mu[q,t-1] + tau_rw[q] * z_incr[q,t-1];
+          mu[q,t] = mu[q,t-1];
       }
 
       // Smoothing temperature on data scale
@@ -343,9 +330,7 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       // jitter prior
       u ~ beta(1, 1);
 
-      // Random walk priors
-      to_vector(z_incr) ~ normal(0, 1);
-      tau_rw ~ student_t(3, 0, base_scale / 3);
+      // mu0 prior (no random walk innovation)
       mu0 ~ normal(mu0_init, 2 * base_scale);
 
       // beta prior
@@ -354,7 +339,6 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       // ----- Score-based likelihood using Z = [X | H] with logit smoothing -----
       {
         if ((p + r) > 0) {
-          //int pr = p + r;
           matrix[pr, m] S;
 
           for (q in 1:m) {
@@ -377,8 +361,6 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
           }
 
           matrix[m, m] L_Q = cholesky_decompose(Q);
-          // A = L_Gs^{-1} S   (pr x m)
-          // B = L_Q^{-1} A'   (m x pr)
           matrix[pr, m] A = mdivide_left_tri_low(L_Gs, S);
           matrix[m, pr] B = mdivide_left_tri_low(L_Q, A');
 
@@ -389,28 +371,33 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       // ----- Priors on gamma (H-coefficients) -----
       if (r > 0) {
 
-        if (prior_code != 3)  {
-          lambda_lasso2 ~ gamma(lambda_lasso2_a, lambda_lasso2_b);
+        // Determine effective lambda_lasso2 value
+        real lambda_lasso2_eff;
+        if (adaptive_gamma == 1) {
+          // Data-adaptive: learn lambda_lasso2 from data via Gamma prior
+          if (prior_code != 3) {
+            lambda_lasso2 ~ gamma(lambda_lasso2_a, lambda_lasso2_b);
+          }
+          lambda_lasso2_eff = lambda_lasso2;
+        } else {
+          // Fixed: use the user-specified value
+          lambda_lasso2_eff = lambda_lasso2_fixed;
         }
 
-        // 1 = group lasso (original grouped Bayesian lasso)
+        // 1 = group lasso
         if (prior_code == 1) {
-
           for (i in 1:r) {
-            tau_gamma_group[i] ~ gamma( (m + 1) / 2, 0.5 * lambda_lasso2 );
+            tau_gamma_group[i] ~ gamma( (m + 1) / 2, 0.5 * lambda_lasso2_eff );
             for (j in 1:m) {
               gamma[j, i] ~ normal(0, sqrt(tau_gamma_group[i]));
             }
           }
 
-        // 2 = lasso (all w_gamma = 1) or
-        // 5 = adaptive lasso (w_gamma from data)
+        // 2 = lasso or 5 = adaptive lasso
         } else if (prior_code == 2 || prior_code == 5) {
-
           for (j in 1:m) {
             for (i in 1:r) {
-              // tau_gamma[q,j] ~ Exp( (lambda * w_gamma[q,j])^2 / 2 )
-              tau_gamma[j, i] ~ exponential(0.5 * lambda_lasso2 * square(w_gamma[j, i]));
+              tau_gamma[j, i] ~ exponential(0.5 * lambda_lasso2_eff * square(w_gamma[j, i]));
               gamma[j, i] ~ normal(0, sqrt(tau_gamma[j, i]));
             }
           }
@@ -418,7 +405,6 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         // 3 = spike-and-slab
         } else if (prior_code == 3) {
           pi_slab ~ beta(slab_pi_a, slab_pi_b);
-
           for (j in 1:m) {
             for (i in 1:r) {
               target += log_mix(
@@ -429,30 +415,22 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
             }
           }
 
-        // 4 = heterogeneous group lasso with Lévy(0, c_levy) mixing
+        // 4 = heterogeneous group lasso with Levy mixing
         } else if (prior_code == 4) {
-
-          real c_levy = lambda_lasso2 / 2;
-
-
+          real c_levy = lambda_lasso2_eff / 2;
           for (j in 1:m) {
-            // Lévy(0, c_levy) ⇔ InvGamma(1/2, c_levy/2)
             omega_group[j] ~ inv_gamma(0.5, 0.5 * c_levy);
-
             for (i in 1:r) {
-
               tau_gamma[j, i] ~ exponential(0.5 * square(omega_group[j] * w_gamma[j, i]));
-              // gamma_{qj} | omega_j ~ N(0, 2 * omega_j / w_gamma[q,j])
               gamma[j, i] ~ normal(0, sqrt(tau_gamma[j, i]));
             }
           }
         }
       }
 
-      // ---- Non-crossing penalty and curvature penalty ----
+      // ---- Non-crossing penalty ----
       {
         real pen = 0;
-        real pen_curv = 0;
 
         for (i in 1:n) {
           vector[m] eta_row;
@@ -462,37 +440,69 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
             eta_row[q] = mu[q, i] + xb + hb + offset[i];
           }
 
-          // ---- Non-crossing penalty
+          // Non-crossing penalty: penalize negative derivatives
           for (q in 1:(m-1)) {
             real dfdtau = (eta_row[q + 1] - eta_row[q]) / dtau[q];
             pen += fmax(0, -dfdtau);
           }
-
-          // ----- Curvature penalty (accumulate curvature across time)
-          if (m > 2) {
-            for (q in 2:(m-1)) {
-              real dtL = tau_q[q]   - tau_q[q-1];
-              real dtR = tau_q[q+1] - tau_q[q];
-
-              real d1 = (eta_row[q]   - eta_row[q-1]) / dtL;
-              real d2 = (eta_row[q+1] - eta_row[q])   / dtR;
-              real curv = (d2 - d1) / ((dtL + dtR) / 2);
-
-              // accumulate |curv|^p per (i,q)
-              pen_curv += pow(fabs(curv), curvature_p);
-            }
-          }
         }
 
-        // ---- Non-crossing penalty
         pen /= (n * (m - 1));
-        target += - penalty_c * pen;
+        target += - lambda_nc * pen;
+      }
 
-        // ----- Curvature penalty: mean |curv|^p over i,q, Lp norm
-        if (m > 2) {
-          pen_curv /= (n * (m - 2));
-          pen_curv = pow(pen_curv, 1.0 / curvature_p);
-          target += - penalty_curv_c * pen_curv;
+      // ---- Interquantile (fused lasso) shrinkage penalty ----
+      // Penalizes |coef[q] - coef[q-1]| with IQ weights (more shrinkage at outer quantiles)
+      // Applied to gamma and beta (NOT mu, as random walk should track quantile-specific evolution)
+      {
+        // Determine effective lambda_iq^2 value, then take sqrt for the penalty
+        real lambda_iq2_eff;
+        if (adaptive_iq == 1) {
+          // Data-adaptive: learn lambda_iq^2 from data via Gamma prior
+          lambda_iq2 ~ gamma(lambda_iq2_a, lambda_iq2_b);
+          lambda_iq2_eff = lambda_iq2;
+        } else {
+          // Fixed: use the user-specified value
+          lambda_iq2_eff = lambda_iq2_fixed;
+        }
+        real lambda_iq_eff = sqrt(lambda_iq2_eff);
+
+        if (lambda_iq_eff > 0) {
+          real pen_iq_gamma = 0;
+          real pen_iq_beta = 0;
+          int n_components = 0;
+
+          // Penalty on gamma (H-coefficients / change-point effects)
+          if (r > 0) {
+            for (j in 1:r) {
+              for (q in 2:m) {
+                pen_iq_gamma += w_iq_vec[q-1] * fabs(gamma[q, j] - gamma[q-1, j]);
+              }
+            }
+            pen_iq_gamma /= (r * (m - 1));
+            n_components += 1;
+          }
+
+          // Penalty on beta (X-coefficients EXCLUDING intercept)
+          // Note: Column 1 of X is the intercept - do NOT penalize it
+          // (Jiang, Wang, & Bondell 2013 only penalize slope coefficients)
+          if (p > 1) {
+            for (j in 2:p) {  // Start from 2 to skip intercept
+              for (q in 2:m) {
+                pen_iq_beta += w_iq_vec[q-1] * fabs(beta[q, j] - beta[q-1, j]);
+              }
+            }
+            pen_iq_beta /= ((p - 1) * (m - 1));
+            n_components += 1;
+          }
+
+          // Note: mu (random walk) is NOT penalized to allow quantile-specific evolution
+
+          // Average across components
+          if (n_components > 0) {
+            real pen_iq_total = (pen_iq_gamma + pen_iq_beta) / n_components;
+            target += - lambda_iq_eff * pen_iq_total;
+          }
         }
       }
 
@@ -516,11 +526,6 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     offset <- rep(0, n)
   }
 
-  # X0: pre-period indicator
-  #X0 <- matrix(0, nrow = n, ncol = 1)
-  #if (w > 0) {
-  #  X0[1:w, ] <- 1
-  #}
   X0 <- matrix(1, nrow = n, ncol = 1)
 
   if (is.null(X)) {
@@ -530,7 +535,6 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
   }
   p <- ncol(X)
 
-  # H processing: standardize and orthogonalize against X (if any)
   if (is.null(H)) {
     r <- 0
     H <- matrix(0, n, 0)
@@ -538,21 +542,13 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     r <- ncol(H)
     if (r == 0) {
       H <- matrix(0, n, 0)
-    } else {
-      if (p > 0) {
-        H_ortho <- apply(H, 2, function(col) stats::resid(stats::lm(col ~ X)))
-        Hs <- scale(H_ortho, center = TRUE, scale = TRUE)
-      } else {
-        Hs <- scale(H, center = TRUE, scale = TRUE)
-      }
-      H <- Hs
     }
   }
 
   # Base scale for smoothing (robust)
   base_scale <- max(1e-8, 1.4826 * stats::mad(y))
 
-  # Initial mu0 by quantiles, possibly only in pre-period
+  # Initial mu0 by quantiles
   if (w > 0) {
     mu0_init <- stats::quantile(y[1:w], probs = taus)
   } else {
@@ -560,7 +556,6 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
   }
 
   # ---- w_gamma construction ----
-  # default: all ones
   w_gamma <- matrix(1, nrow = m, ncol = r)
 
   if (r > 0 && prior_gamma %in% c("het_group_lasso", "adaptive_lasso")) {
@@ -575,11 +570,9 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         tau = taus[q],
         alpha  = alpha,
         eps_w  = eps_w
-        # you can optionally pass lambda_lasso = ... here
       )
     }
 
-    # Normalize so median weight is 1 (helps interpret the penalty level)
     med_w <- stats::median(w_gamma)
     if (is.finite(med_w) && med_w > 0) {
       w_gamma <- w_gamma / med_w
@@ -595,8 +588,13 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     y = y, offset = offset, tau_q = taus,
     mu0_init = as.vector(mu0_init),
     base_scale = base_scale, c_sigma = c_sigma, beta_sd = beta_sd,
-    penalty_c = penalty_c, penalty_curv_c = penalty_curv_c, curvature_p = curvature_p, T_rel = T_rel,
+    lambda_nc = lambda_nc, T_rel = T_rel,
+    lambda_iq2_a = lambda_iq2_a, lambda_iq2_b = lambda_iq2_b,
+    adaptive_iq = as.integer(adaptive_iq),
+    lambda_iq2_fixed = lambda_iq2_fixed,
     lambda_lasso2_a = lambda_lasso2_a, lambda_lasso2_b = lambda_lasso2_b,
+    adaptive_gamma = as.integer(adaptive_gamma),
+    lambda_lasso2_fixed = lambda_lasso2_fixed,
     log_flag = log_flag, jittering = jittering,
     prior_code = prior_code,
     w_gamma = if (r > 0) w_gamma else matrix(0, m, 0),
@@ -609,54 +607,333 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
   # Compile Stan model once
   sm <- rstan::stan_model(model_code = stan_code)
 
-  # Always obtain a MAP estimate first
-  if ((fit_method == "map_then_sampling") | (fit_method == "map")) {
-    map_fit <- {
-      opt_args <- list(
-        object = sm,
-        data = stan_data,
-        hessian = TRUE,
-        as_vector = FALSE,
-        seed = seed,
-        verbose = verbose
-      )
-      # rstan::optimizing does not accept 'control' in some versions; only add if non-null and recognized
-      # old: control = control
-      suppressWarnings(do.call(rstan::optimizing, opt_args))
-    }
-    hessian <- map_fit$hessian
-  } else {
-    map_fit <- NULL
-    hessian <- NULL
-  }
-  
+  # Initialize outputs
+  fit <- NULL
+  map_fit <- NULL
+  hessian <- NULL
+  laplace_samples <- NULL
 
-  if (fit_method == "map_then_sampling") {
-    init_theta <- map_fit$par  # constrained params
-    fit <- suppressWarnings(
-      rstan::sampling(
-        sm, data = stan_data,
-        chains = chains, iter = iter, warmup = warmup,
-        init = function() init_theta, init_r = 0.01,
-        control = control, seed = seed, verbose = verbose
-      )
+  # Helper: parse 2D parameter indices from names like "gamma[1,2]"
+  parse_2d_idx <- function(par_names, idx, prefix) {
+    dims_str <- gsub(paste0(prefix, "\\[|\\]"), "", par_names[idx])
+    dims_split <- strsplit(dims_str, ",")
+    list(
+      row = as.integer(sapply(dims_split, `[`, 1)),
+      col = as.integer(sapply(dims_split, `[`, 2))
     )
-  } else if (fit_method == "sampling") {
-    fit <- suppressWarnings(
-      rstan::sampling(
-        sm, data = stan_data,
-        chains = chains, iter = iter, warmup = warmup,
-        control = control, seed = seed, verbose = verbose
-      )
+  }
+
+  # Helper: scatter flat sample vector into 3D array
+  scatter_to_array <- function(samples_mat, row_idx, col_idx, n_row, n_col, n_samples) {
+    arr <- array(NA, dim = c(n_samples, n_row, n_col))
+    for (i in seq_along(row_idx)) {
+      arr[, row_idx[i], col_idx[i]] <- samples_mat[, i]
+    }
+    arr
+  }
+
+  # Helper function to generate Laplace approximation samples from MAP
+  #
+  # The Hessian from rstan::optimizing() is on the UNCONSTRAINED parameter scale
+  # and has dimensions k x k where k = number of raw parameters (NOT including
+
+  # transformed parameters). par_map includes both raw + transformed parameters,
+  # so length(par_map) > k.
+  #
+  # mu is a TRANSFORMED parameter (mu[q,t] = mu[q,t-1], mu[q,1] = mu0[q]).
+  # Since mu[q,t] = mu0[q] for all t, we sample mu0 from the Hessian
+  # and replicate across time points.
+  generate_laplace_samples <- function(par_map, hessian, n_samples, noise_scale, seed_val) {
+    if (!is.null(seed_val)) set.seed(seed_val)
+
+    par_names <- names(par_map)
+    n_par <- length(par_map)
+
+    # --- Identify raw parameter indices (first k entries of par_map) ---
+    # The Hessian has k rows/cols corresponding to the raw (unconstrained) parameters.
+    # par_map[1:k] = raw parameters on CONSTRAINED scale
+    # par_map[(k+1):n_par] = transformed parameters
+    k <- if (!is.null(hessian)) nrow(hessian) else 0
+    raw_par_names <- if (k > 0) names(par_map)[1:k] else character(0)
+
+    # Indices within raw parameters for the components we need for eta
+    z_incr_idx <- grep("^z_incr\\[", raw_par_names)
+    tau_rw_idx <- grep("^tau_rw",    raw_par_names)
+    mu0_idx    <- grep("^mu0\\[",    raw_par_names)
+    beta_idx   <- grep("^beta\\[",   raw_par_names)
+    gamma_idx  <- grep("^gamma\\[",  raw_par_names)
+    eta_param_idx <- c(z_incr_idx, tau_rw_idx, mu0_idx, beta_idx, gamma_idx)
+
+    # Also find mu (transformed parameter) indices for the heuristic fallback
+    mu_tp_idx <- grep("^mu\\[", par_names)
+
+    # Parse dimensions from parameter names
+    z_incr_parsed <- if (length(z_incr_idx) > 0) parse_2d_idx(raw_par_names, z_incr_idx, "z_incr") else NULL
+    mu0_parsed    <- if (length(mu0_idx) > 0) {
+      # mu0 is a vector: mu0[1], mu0[2], ... — parse as 1D
+      dims_str <- gsub("mu0\\[|\\]", "", raw_par_names[mu0_idx])
+      list(idx = as.integer(dims_str))
+    } else NULL
+    tau_rw_parsed <- if (length(tau_rw_idx) > 0) {
+      dims_str <- gsub("tau_rw\\[|\\]", "", raw_par_names[tau_rw_idx])
+      list(idx = as.integer(dims_str))
+    } else NULL
+    beta_parsed   <- if (length(beta_idx) > 0) parse_2d_idx(raw_par_names, beta_idx, "beta") else NULL
+    gamma_parsed  <- if (length(gamma_idx) > 0) parse_2d_idx(raw_par_names, gamma_idx, "gamma") else NULL
+    mu_tp_parsed  <- if (length(mu_tp_idx) > 0) parse_2d_idx(par_names, mu_tp_idx, "mu") else NULL
+
+    # --- Try proper Hessian-based Laplace approximation ---
+    laplace_ok <- FALSE
+    mu_array <- NULL
+    beta_array <- NULL
+    gamma_array <- NULL
+
+    if (!is.null(hessian) && k > 0 && length(eta_param_idx) > 0) {
+      laplace_result <- tryCatch({
+
+        # Build unconstrained mean vector for the full raw parameter space
+        # par_map[1:k] is on constrained scale; Hessian is on unconstrained scale
+        # For tau_rw (<lower=0>): unconstrained = log(constrained)
+        # For z_incr, mu0, beta, gamma (no bounds): unconstrained = constrained
+        theta_unc_full <- as.numeric(par_map[1:k])
+        theta_unc_full[tau_rw_idx] <- log(pmax(par_map[tau_rw_idx], 1e-10))
+
+        # Also transform other constrained params for correct Hessian inversion:
+        # tau_gamma_group (<lower=0>): log
+        tgg_idx <- grep("^tau_gamma_group", raw_par_names)
+        if (length(tgg_idx) > 0) theta_unc_full[tgg_idx] <- log(pmax(par_map[tgg_idx], 1e-10))
+        # tau_gamma (<lower=0>): log
+        tg_idx <- grep("^tau_gamma\\[", raw_par_names)
+        if (length(tg_idx) > 0) theta_unc_full[tg_idx] <- log(pmax(par_map[tg_idx], 1e-10))
+        # lambda_lasso2, lambda_iq2, omega_group (<lower=0>): log
+        for (pat in c("^lambda_lasso2$", "^lambda_iq2$", "^omega_group")) {
+          idx_tmp <- grep(pat, raw_par_names)
+          if (length(idx_tmp) > 0) theta_unc_full[idx_tmp] <- log(pmax(par_map[idx_tmp], 1e-10))
+        }
+        # pi_slab (<lower=0, upper=1>): logit
+        pi_idx <- grep("^pi_slab$", raw_par_names)
+        if (length(pi_idx) > 0) {
+          pv <- pmin(pmax(par_map[pi_idx], 1e-10), 1 - 1e-10)
+          theta_unc_full[pi_idx] <- log(pv / (1 - pv))
+        }
+        # u (<lower=1e-12, upper=1>): logit (approx)
+        u_idx <- grep("^u\\[", raw_par_names)
+        if (length(u_idx) > 0) {
+          uv <- pmin(pmax(par_map[u_idx], 1e-10), 1 - 1e-10)
+          theta_unc_full[u_idx] <- log(uv / (1 - uv))
+        }
+
+        # Invert full Hessian to get posterior covariance on unconstrained scale
+        H_neg <- -(hessian + t(hessian)) / 2  # ensure symmetry
+        H_neg_reg <- H_neg + diag(1e-6, k)
+        Sigma_full <- solve(H_neg_reg)
+
+        # Extract marginal covariance for the eta-related parameters
+        Sigma_sub <- Sigma_full[eta_param_idx, eta_param_idx]
+
+        # Ensure positive definiteness
+        eig <- eigen(Sigma_sub, symmetric = TRUE)
+        eig$values <- pmax(eig$values, 1e-8)
+        n_eta <- length(eig$values)
+        L <- t(eig$vectors %*% diag(sqrt(eig$values), nrow = n_eta, ncol = n_eta))
+
+        # Sample from MVN on unconstrained scale
+        theta_unc_sub <- theta_unc_full[eta_param_idx]
+        z_mat <- matrix(rnorm(n_samples * length(eta_param_idx)), n_samples, length(eta_param_idx))
+        samples_unc <- sweep(z_mat %*% L, 2, theta_unc_sub, "+")
+
+        # --- Map columns back to parameter blocks ---
+        # Column offsets within samples_unc (follows the order of eta_param_idx)
+        z_incr_cols <- seq_along(z_incr_idx)
+        tau_rw_cols <- length(z_incr_idx) + seq_along(tau_rw_idx)
+        mu0_cols    <- length(z_incr_idx) + length(tau_rw_idx) + seq_along(mu0_idx)
+        beta_cols   <- length(z_incr_idx) + length(tau_rw_idx) + length(mu0_idx) + seq_along(beta_idx)
+        gamma_cols  <- length(z_incr_idx) + length(tau_rw_idx) + length(mu0_idx) + length(beta_idx) + seq_along(gamma_idx)
+
+        # --- Reconstruct mu from mu0 (mu[q,t] = mu0[q] for all t) ---
+        m_q <- max(mu0_parsed$idx)
+        # Get n_time from transformed mu parameter in par_map
+        n_time <- if (!is.null(mu_tp_parsed)) max(mu_tp_parsed$col) else 1
+
+        mu_arr <- array(NA, dim = c(n_samples, m_q, n_time))
+
+        for (s in 1:n_samples) {
+          # Extract mu0
+          mu0_s <- numeric(m_q)
+          for (i in seq_along(mu0_parsed$idx)) {
+            mu0_s[mu0_parsed$idx[i]] <- samples_unc[s, mu0_cols[i]]
+          }
+
+          # mu[q,t] = mu0[q] for all t (no random walk)
+          for (q in 1:m_q) {
+            mu_arr[s, q, ] <- mu0_s[q]
+          }
+        }
+
+        # --- Assemble beta and gamma arrays ---
+        beta_arr <- if (length(beta_idx) > 0) {
+          scatter_to_array(samples_unc[, beta_cols, drop = FALSE],
+                           beta_parsed$row, beta_parsed$col,
+                           max(beta_parsed$row), max(beta_parsed$col), n_samples)
+        } else NULL
+
+        gamma_arr <- if (length(gamma_idx) > 0) {
+          scatter_to_array(samples_unc[, gamma_cols, drop = FALSE],
+                           gamma_parsed$row, gamma_parsed$col,
+                           max(gamma_parsed$row), max(gamma_parsed$col), n_samples)
+        } else NULL
+
+        list(mu = mu_arr, beta = beta_arr, gamma = gamma_arr)
+
+      }, error = function(e) {
+        warning("Hessian-based Laplace failed: ", conditionMessage(e),
+                ". Falling back to heuristic noise.")
+        NULL
+      })
+
+      if (!is.null(laplace_result)) {
+        mu_array <- laplace_result$mu
+        beta_array <- laplace_result$beta
+        gamma_array <- laplace_result$gamma
+        laplace_ok <- TRUE
+      }
+    }
+
+    # --- Fallback: heuristic noise (when Hessian is unavailable or inversion fails) ---
+    if (!laplace_ok) {
+
+      mu_array <- if (length(mu_tp_idx) > 0) {
+        m_mu <- max(mu_tp_parsed$row); n_mu <- max(mu_tp_parsed$col)
+        mu_map <- matrix(NA, m_mu, n_mu)
+        for (i in seq_along(mu_tp_idx)) mu_map[mu_tp_parsed$row[i], mu_tp_parsed$col[i]] <- par_map[mu_tp_idx[i]]
+        mu_sd <- matrix(NA, m_mu, n_mu)
+        for (q in 1:m_mu) {
+          d_sd <- sd(diff(mu_map[q, ]), na.rm = TRUE)
+          if (is.na(d_sd) || d_sd < 1e-6) d_sd <- 0.1
+          mu_sd[q, ] <- d_sd * noise_scale
+        }
+        arr <- array(NA, dim = c(n_samples, m_mu, n_mu))
+        for (s in 1:n_samples) arr[s, , ] <- mu_map + matrix(rnorm(m_mu * n_mu, 0, mu_sd), m_mu, n_mu)
+        arr
+      }
+
+      beta_array <- if (length(beta_idx) > 0) {
+        # For fallback, find beta in the full par_names (not just raw)
+        beta_full_idx <- grep("^beta\\[", par_names)
+        beta_full_parsed <- parse_2d_idx(par_names, beta_full_idx, "beta")
+        m_beta <- max(beta_full_parsed$row); p_beta <- max(beta_full_parsed$col)
+        beta_map <- matrix(NA, m_beta, p_beta)
+        for (i in seq_along(beta_full_idx)) beta_map[beta_full_parsed$row[i], beta_full_parsed$col[i]] <- par_map[beta_full_idx[i]]
+        beta_sd <- pmax(abs(beta_map) * noise_scale, 0.05)
+        arr <- array(NA, dim = c(n_samples, m_beta, p_beta))
+        for (s in 1:n_samples) arr[s, , ] <- beta_map + matrix(rnorm(m_beta * p_beta, 0, beta_sd), m_beta, p_beta)
+        arr
+      }
+
+      gamma_array <- if (length(gamma_idx) > 0) {
+        gamma_full_idx <- grep("^gamma\\[", par_names)
+        gamma_full_parsed <- parse_2d_idx(par_names, gamma_full_idx, "gamma")
+        m_gamma <- max(gamma_full_parsed$row); r_gamma <- max(gamma_full_parsed$col)
+        gamma_map <- matrix(NA, m_gamma, r_gamma)
+        for (i in seq_along(gamma_full_idx)) gamma_map[gamma_full_parsed$row[i], gamma_full_parsed$col[i]] <- par_map[gamma_full_idx[i]]
+        gamma_sd <- pmax(abs(gamma_map) * noise_scale, 0.02)
+        arr <- array(NA, dim = c(n_samples, m_gamma, r_gamma))
+        for (s in 1:n_samples) arr[s, , ] <- gamma_map + matrix(rnorm(m_gamma * r_gamma, 0, gamma_sd), m_gamma, r_gamma)
+        arr
+      }
+    }
+
+    list(mu = mu_array, beta = beta_array, gamma = gamma_array)
+  }
+
+  # ------------------------------------------------------------------
+  # fit_method = "mcmc": MCMC only, estimators are posterior median
+  # ------------------------------------------------------------------
+  if (fit_method == "mcmc") {
+    fit <- rstan::sampling(
+      sm, data = stan_data,
+      chains = chains, iter = iter, warmup = warmup,
+      control = control, seed = seed, verbose = verbose
     )
-  } else { # map only
-    fit <- NULL
+
+    # Extract posterior median as point estimates
+    draws <- rstan::extract(fit, pars = c("mu", "beta", "gamma"))
+    map_fit <- list(par = list())
+    map_fit$par$mu <- apply(draws$mu, c(2, 3), median)
+    if (!is.null(draws$beta)) map_fit$par$beta <- apply(draws$beta, c(2, 3), median)
+    if (!is.null(draws$gamma)) map_fit$par$gamma <- apply(draws$gamma, c(2, 3), median)
+    map_fit$estimator <- "posterior_median"
+
+  # ------------------------------------------------------------------
+  # fit_method = "map_mcmc": MAP estimators, MCMC posterior draws
+  # ------------------------------------------------------------------
+  } else if (fit_method == "map_mcmc") {
+    # First get MAP estimates
+    opt_args <- list(
+      object = sm,
+      data = stan_data,
+      hessian = map_hessian,
+      as_vector = FALSE,
+      seed = seed,
+      verbose = verbose
+    )
+    if (!is.null(map_tol_obj))       opt_args$tol_obj       <- map_tol_obj
+    if (!is.null(map_tol_grad))      opt_args$tol_grad      <- map_tol_grad
+    if (!is.null(map_tol_rel_grad))  opt_args$tol_rel_grad  <- map_tol_rel_grad
+    if (!is.null(map_tol_param))     opt_args$tol_param     <- map_tol_param
+    if (!is.null(map_iter))          opt_args$iter          <- map_iter
+    map_fit <- do.call(rstan::optimizing, opt_args)
+    map_fit$estimator <- "map"
+
+    hessian <- if (map_hessian && !is.null(map_fit$hessian)) map_fit$hessian else NULL
+
+    # Then run MCMC with MAP as initialization
+    init_theta <- map_fit$par
+    fit <- rstan::sampling(
+      sm, data = stan_data,
+      chains = chains, iter = iter, warmup = warmup,
+      init = function() init_theta, init_r = 0.01,
+      control = control, seed = seed, verbose = verbose
+    )
+
+  # ------------------------------------------------------------------
+  # fit_method = "map": MAP estimators, Laplacian approximation draws
+  # ------------------------------------------------------------------
+  } else if (fit_method == "map") {
+    opt_args <- list(
+      object = sm,
+      data = stan_data,
+      hessian = map_hessian,
+      as_vector = TRUE,
+      seed = seed,
+      verbose = verbose
+    )
+    if (!is.null(map_tol_obj))       opt_args$tol_obj       <- map_tol_obj
+    if (!is.null(map_tol_grad))      opt_args$tol_grad      <- map_tol_grad
+    if (!is.null(map_tol_rel_grad))  opt_args$tol_rel_grad  <- map_tol_rel_grad
+    if (!is.null(map_tol_param))     opt_args$tol_param     <- map_tol_param
+    if (!is.null(map_iter))          opt_args$iter          <- map_iter
+    map_fit <- do.call(rstan::optimizing, opt_args)
+    map_fit$estimator <- "map"
+
+    hessian <- if (map_hessian && !is.null(map_fit$hessian)) map_fit$hessian else NULL
+
+    # Generate Laplace approximation samples (uses Hessian if available)
+    laplace_samples <- generate_laplace_samples(
+      par_map = map_fit$par,
+      hessian = hessian,
+      n_samples = laplace_n_samples,
+      noise_scale = laplace_noise_scale,
+      seed_val = seed
+    )
   }
 
   list(
     fit = fit,
     map = map_fit,
     y = y, H = H, X = X,
-    hessian = hessian
+    hessian = hessian,
+    fit_method = fit_method,
+    laplace_samples = laplace_samples
   )
 }

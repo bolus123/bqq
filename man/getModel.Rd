@@ -2,7 +2,7 @@
 % Please edit documentation in R/getModel.R
 \name{getModel}
 \alias{getModel}
-\title{Smoothed Quantile Regression with Group-Lasso Shrinkage (Stan)}
+\title{Smoothed Quantile Regression with Interquantile Shrinkage (Stan)}
 \usage{
 getModel(
   y,
@@ -14,19 +14,40 @@ getModel(
   alpha = 0.75,
   eps_w = 0.001,
   c_sigma = 1,
-  penalty_c = 10,
-  penalty_curv_c = 10,
+  beta_sd = 1,
+  lambda_nc = 2,
   T_rel = 0.1,
+  adaptive_iq = TRUE,
+  lambda_iq2_a = 1,
+  lambda_iq2_b = 0.1,
+  lambda_iq2_fixed = 1,
+  adaptive_gamma = TRUE,
   lambda_lasso2_a = 1,
-  lambda_lasso2_b = 1,
+  lambda_lasso2_b = 0.05,
+  lambda_lasso2_fixed = 1,
   log_flag = 0,
   jittering = 0,
   chains = 1,
   iter = 1500,
   warmup = 500,
-  control = NULL,
+  control = list(adapt_delta = 0.99),
   seed = 123,
-  verbose = FALSE
+  verbose = FALSE,
+  map_hessian = TRUE,
+  map_tol_obj = 1e-12,
+  map_tol_grad = 1e-08,
+  map_tol_rel_grad = 10000,
+  map_tol_param = 1e-08,
+  map_iter = 2000,
+  fit_method = c("mcmc", "map_mcmc", "map"),
+  laplace_n_samples = 1000,
+  laplace_noise_scale = 0.1,
+  prior_gamma = c("group_lasso", "lasso", "spike_slab", "het_group_lasso",
+    "adaptive_lasso"),
+  spike_sd = 0.05,
+  slab_sd = 2,
+  slab_pi_a = 1,
+  slab_pi_b = 1
 )
 }
 \arguments{
@@ -37,55 +58,85 @@ getModel(
 \item{H}{Numeric matrix \eqn{n \times r} of structured predictors for group-lasso
 coefficients \eqn{\gamma}. If \eqn{r = 0}, pass a zero-column matrix.}
 
-\item{X}{Optional numeric matrix \eqn{n \times p_x} of additional predictors.
-If supplied, \code{X0} (defined by \code{w}) is prepended as the first column.
-If \code{NULL} (default), \code{X} consists only of \code{X0}.}
+\item{X}{Optional numeric matrix \eqn{n \times p_x} of additional predictors.}
 
-\item{offset}{Optional numeric vector of length \eqn{n} added to the linear predictor.
-Defaults to 0.}
+\item{offset}{Optional numeric vector of length \eqn{n} added to the linear predictor.}
 
-\item{w}{Integer \eqn{\ge 1}. Creates an intercept-like column \code{X0} with the
-first \code{w} entries set to 1 and the rest 0 (e.g., a pre-period indicator),
-which is then included in \code{X}.}
+\item{w}{Integer \eqn{\ge 1}. Used for initial quantile estimation from first w observations.}
 
-\item{alpha, eps_w}{Reserved for future adaptive LASSO weights; currently unused
-(weight construction code is commented out).}
+\item{beta_sd}{Positive scalar prior std dev for \code{beta} coefficients (default 1.0).}
 
-\item{c_sigma}{Nonnegative scalar controlling the (currently disabled) per-quantile
-scale prior; kept for compatibility.}
+\item{lambda_nc}{Positive scalar weight for the non-crossing penalty (larger is stricter).}
 
-\item{penalty_c}{Positive scalar weight for the non-crossing penalty (larger is stricter).}
+\item{T_rel}{Positive scalar "smoothing temperature" (dimensionless).}
 
-\item{penalty_curv_c}{Positive scalar weight for the curvature of the non-crossing penalty (larger is stricter).}
+\item{adaptive_iq}{Logical; if TRUE (default), the IQ shrinkage rate lambda_iq2
+is learned from data via a Gamma prior. If FALSE, lambda_iq2_fixed is used.}
 
-\item{T_rel}{Positive scalar “smoothing temperature” (dimensionless). The actual
-smoothing scale is \code{base_scale * T_rel}, where \code{base_scale = sd(y)}.}
+\item{lambda_iq2_a, lambda_iq2_b}{Positive shape/rate hyperparameters for the
+IQ shrinkage rate \eqn{\lambda_{iq}^2} (used when adaptive_iq = TRUE).
+Prior: \eqn{\lambda_{iq}^2 \sim \mathrm{Gamma}(a, b)}, mean = a/b.
+Effective penalty weight is \eqn{\sqrt{\lambda_{iq}^2}}.}
+
+\item{lambda_iq2_fixed}{Positive scalar; fixed value for \eqn{\lambda_{iq}^2} when
+adaptive_iq = FALSE (default 1). Effective penalty = \eqn{\sqrt{\lambda_{iq2\_fixed}}}.}
+
+\item{adaptive_gamma}{Logical; if TRUE (default), the global LASSO rate lambda_lasso2
+is learned from data via a Gamma prior. If FALSE, lambda_lasso2_fixed is used as a fixed value.}
 
 \item{lambda_lasso2_a, lambda_lasso2_b}{Positive shape/rate hyperparameters for the
-global LASSO rate \eqn{\lambda}.}
+global LASSO rate \eqn{\lambda} (used when adaptive_gamma = TRUE).}
 
-\item{log_flag}{Integer \code{0/1}. If 1, fit on \code{log(y)} (with optional jitter)
-and include Jacobian.}
+\item{lambda_lasso2_fixed}{Positive scalar; fixed value for global LASSO rate when
+adaptive_gamma = FALSE (default 1).}
 
-\item{jittering}{Integer \code{0/1}. If 1, add \eqn{u \sim \mathrm{Beta}(1,1)} to \eqn{y}
-(or inside the log if \code{log_flag = 1}) to mitigate ties / boundary issues.}
+\item{log_flag}{Integer \code{0/1}. If 1, fit on \code{log(y)}.}
 
-\item{chains}{Number of MCMC chains (passed to \code{rstan::sampling()}).}
+\item{jittering}{Integer \code{0/1}. If 1, add \eqn{u \sim \mathrm{Beta}(1,1)} to \eqn{y}.}
+
+\item{chains}{Number of MCMC chains.}
 
 \item{iter}{Total iterations per chain.}
 
 \item{warmup}{Warmup iterations per chain.}
 
-\item{control}{Optional list passed to \code{rstan::sampling()} (e.g., \code{adapt\_delta}).}
+\item{control}{Optional list passed to \code{rstan::sampling()}.}
 
 \item{seed}{RNG seed.}
 
 \item{verbose}{show the log.}
+
+\item{map_hessian}{Logical; if \code{TRUE} compute Hessian in MAP step.}
+
+\item{map_tol_obj, map_tol_grad, map_tol_rel_grad, map_tol_param}{MAP optimizer tolerances.}
+
+\item{map_iter}{Maximum iterations for MAP optimization.}
+
+\item{fit_method}{One of "mcmc", "map_mcmc", or "map":
+\itemize{
+  \item "mcmc": Estimators are posterior median from MCMC; posterior draws from MCMC.
+  \item "map_mcmc": Estimators are MAP; posterior draws from MCMC (MAP used as init).
+  \item "map": Estimators are MAP; posterior draws from Laplacian approximation.
+}}
+
+\item{laplace_n_samples}{Number of samples for Laplacian approximation (when fit_method = "map").}
+
+\item{laplace_noise_scale}{Scale factor for parameter perturbation in Laplacian approximation.}
+
+\item{prior_gamma}{Prior type for gamma: "group_lasso", "lasso", "spike_slab", "het_group_lasso", "adaptive_lasso".}
+
+\item{spike_sd, slab_sd, slab_pi_a, slab_pi_b}{Spike-and-slab hyperparameters.}
 }
 \value{
-An object of class \code{rstan::stanfit} containing posterior draws for
-  \eqn{\mu}, \eqn{\beta}, \eqn{\gamma}, \eqn{\tau^{(rw)}}, \eqn{\lambda}, group variances,
-  and other latent quantities used in the smoothed score.
+A list with components:
+  \itemize{
+    \item fit: stanfit object (NULL if fit_method = "map")
+    \item map: MAP estimates (contains $par with parameter values)
+    \item y, H, X: Input data and design matrices
+    \item hessian: Hessian at MAP (if computed)
+    \item fit_method: The estimation method used
+    \item laplace_samples: Pre-generated Laplacian samples (if fit_method = "map")
+  }
 }
 \description{
 Fits a multi-quantile (\eqn{m}) regression model where the conditional
@@ -93,19 +144,8 @@ quantile function is modeled as a latent random walk in time (or index)
 with optional fixed effects \eqn{X} and structured effects \eqn{H}.
 The \eqn{H}-coefficients are shrunk via a **grouped Bayesian LASSO**
 (column-wise sharing across quantiles), and adjacent quantiles are softly
-penalized to discourage crossings. The likelihood is optimized using a
-**smoothed score** (logit-smoothed indicator) with temperature
-\code{T_rel * base_scale}. The model is implemented in Stan and estimated
-via MCMC using \strong{rstan}.
-}
-\details{
-Internally, \code{H} is standardized (column-wise) and, if \code{p > 0}, first orthogonalized
-against the columns of \code{X} to reduce competition. The Gram matrix of
-\code{Z = [X | H]} is computed once for scoring, with a tiny ridge for numerical stability.
-
-The function constructs a \code{stan\_model} from the embedded \code{stan\_code} string and
-then runs \code{rstan::sampling()}. By default, only the group-LASSO hierarchy is active; the
-element-wise adaptive-LASSO section is present but commented out in the Stan program.
+penalized to discourage crossings. **Interquantile shrinkage** stabilizes
+outer quantiles by penalizing differences between adjacent quantile coefficients.
 }
 \section{Model (high level)}{
 
@@ -117,63 +157,22 @@ element-wise adaptive-LASSO section is present but commented out in the Stan pro
       \item \eqn{\mu_{q,\cdot}} is a random walk per quantile: \eqn{\mu_{q,t} = \mu_{q,t-1} + \tau^{(rw)}_q z_{q,t-1}}.
     }
   }
-  \item{Score objective}{
-    Uses the logit-smoothed check-function derivative
-    \eqn{\psi_{qi} = \tau_q - \mathrm{logit}^{-1}(-r_{qi}/(T_{\text{rel}} \cdot \text{base\_scale}))}
-    with a quadratic form based on the quantile kernel \eqn{Q} and the Gram of \eqn{[X|H]}.
-  }
-  \item{Shrinkage on \eqn{\gamma}}{
-    Column-wise grouped Bayesian LASSO:
-    \eqn{\gamma_{qj} \sim \mathcal{N}(0, \sqrt{\tau_{\gamma,j}})},\quad
-    \eqn{\tau_{\gamma,j} \sim \mathrm{Gamma}((m+1)/2,\ 0.5\,\lambda)},\quad
-    \eqn{\lambda \sim \mathrm{Gamma}(\texttt{lambda\_lasso2\_a},\ \texttt{lambda\_lasso2\_b})}.
+  \item{Interquantile shrinkage}{
+    Penalizes differences between adjacent quantile coefficients for gamma and beta slopes:
+    \eqn{\text{pen}_{\text{IQ}} = \sum_{q=2}^m w_q (|\gamma_{q} - \gamma_{q-1}| + |\beta_{q}^{slope} - \beta_{q-1}^{slope}|)}
+    where \eqn{w_q = 1/\sqrt{\tau_q(1-\tau_q)\tau_{q-1}(1-\tau_{q-1})}} gives more weight to outer quantiles.
+    This stabilizes outer quantiles by borrowing strength from inner quantiles.
+    Note: Intercept is NOT penalized (per Jiang, Wang, & Bondell 2013).
+    Note: mu (random walk) is NOT penalized to allow quantile-specific temporal evolution.
   }
   \item{Non-crossing penalty}{
     Adds an L1 hinge on the finite-difference derivative in \eqn{\tau},
-    scaled by \code{penalty_c}.
-  }
-  \item{Optional transforms}{
-    \code{jittering = 1} adds \eqn{u \sim \mathrm{Beta}(1,1)} to \eqn{y};
-    \code{log\_flag = 1} fits the model on \eqn{\log(y + u)} and includes the Jacobian.
+    scaled by \code{lambda_nc}.
   }
 }
 }
 
-\section{Convergence & diagnostics}{
-
-Inspect R-hat, effective sample sizes, and divergences (increase \code{adapt\_delta}
-and/or \code{iter} as needed). Because the likelihood is based on a smoothed score,
-\code{T_rel} can materially affect mixing and sharpness of the posterior.
-}
-
-\examples{
-\dontrun{
-  set.seed(1)
-  n   <- 100
-  m   <- 3
-  tau <- c(0.25, 0.5, 0.75)
-
-  # Design
-  w <- 20
-  X <- cbind(rnorm(n))          # one extra covariate (X0 is added automatically)
-  H <- cbind(rnorm(n), rnorm(n))# two structured columns for group-lasso
-  off <- rep(0, n)
-
-  # Data (toy)
-  f  <- 0.3 * (1:n)/n + 0.5 * X[,1] - 0.7 * H[,1] + 0.2 * H[,2]
-  y  <- f + rnorm(n, 0, 0.3)
-
-  fit <- getModel(
-    y = y, taus = tau, H = H, w = w, X = X, offset = off,
-    chains = 2, iter = 1000, warmup = 500, seed = 123
-  )
-
-  print(fit, pars = c("lambda_lasso2", "tau_gamma_group"))
-  # posterior summaries for gamma (H-coefficients) by quantile:
-  # rstan::summary(fit, pars = "gamma")$summary
-}
-
-}
-\seealso{
-\code{\link[rstan]{sampling}}, \code{\link[rstan]{stan_model}}
+\references{
+Jiang, L., Wang, H. J., & Bondell, H. D. (2013). Interquantile Shrinkage in Regression Models.
+Journal of Computational and Graphical Statistics, 22(4), 970-986.
 }
