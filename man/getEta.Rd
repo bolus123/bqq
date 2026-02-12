@@ -13,6 +13,8 @@ getEta(fit_result, H, X = NULL, offset = NULL, n_samples = 1000, seed = NULL)
 
 \item{X}{Design matrix for beta coefficients (including intercept)}
 
+\item{offset}{Optional numeric vector of length n added to the linear predictor.}
+
 \item{n_samples}{Number of samples for Laplace approximation (only used if fit_result
 doesn't have laplace_samples and needs to generate them)}
 
@@ -25,4 +27,16 @@ doesn't have laplace_samples and needs to generate them)}
 Automatically detects the fit_method used and extracts posterior samples accordingly:
 - "mcmc" or "map_mcmc": Uses MCMC posterior draws from stanfit object
 - "map": Uses pre-generated Laplacian approximation samples
+}
+\examples{
+\donttest{
+set.seed(123)
+n <- 100
+y <- rnorm(n)
+taus <- c(0.25, 0.5, 0.75)
+H <- getIsolatedShift(n, l = 20, w = 20)
+fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+                map_hessian = FALSE, map_iter = 500)
+eta <- getEta(fit, H = H)
+}
 }

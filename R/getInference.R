@@ -7,7 +7,6 @@
 # 1. Predictive quantile-based inference (chi-squared tests on quantile vectors)
 # 2. Predictive distributional statistics-based inference (location, scale, skew, kurtosis)
 
-library(MASS)  # For mvrnorm
 
 # =============================================================================
 # Laplacian Approximation for MAP Inference
@@ -27,6 +26,17 @@ library(MASS)  # For mvrnorm
 #' @param noise_scale Scale factor for parameter perturbation (default: 0.1)
 #' @param seed Random seed for reproducibility
 #' @return List with parameter samples in the same structure as rstan::extract()
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' samples <- getLaplaceSamples(fit$map, n_samples = 100)
+#' }
 #' @export
 getLaplaceSamples <- function(map_fit, hessian = NULL, n_samples = 1000,
                               noise_scale = 0.1, seed = NULL) {
@@ -155,10 +165,22 @@ getLaplaceSamples <- function(map_fit, hessian = NULL, n_samples = 1000,
 #' @param fit_result Full result from getModel()
 #' @param H Design matrix for gamma coefficients
 #' @param X Design matrix for beta coefficients (including intercept)
+#' @param offset Optional numeric vector of length n added to the linear predictor.
 #' @param n_samples Number of samples for Laplace approximation (only used if fit_result
 #'   doesn't have laplace_samples and needs to generate them)
 #' @param seed Random seed (only used if generating new Laplace samples)
 #' @return 3D array [iterations, quantiles, time]
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' eta <- getEta(fit, H = H)
+#' }
 #' @export
 getEta <- function(fit_result, H, X = NULL, offset = NULL, n_samples = 1000, seed = NULL) {
 
@@ -285,7 +307,7 @@ getEta <- function(fit_result, H, X = NULL, offset = NULL, n_samples = 1000, see
 #' Compute BQQ chi-squared statistic for quantile vectors
 #'
 #' Implements the chi-squared-inspired charting statistic from the BQQ methodology:
-#' W_t = Z_t' * S^{-1} * Z_t
+#' \eqn{W_t = Z_t' S^{-1} Z_t}
 #' where Z_t = mean(Z_tr) across posterior draws r.
 #'
 #' The covariance S is estimated from the warm-up period to reflect the natural
@@ -309,6 +331,18 @@ getEta <- function(fit_result, H, X = NULL, offset = NULL, n_samples = 1000, see
 #' @param y Original data (required only for signal_position = "max_deviation")
 #' @param taus Quantile levels (required only for signal_position = "max_deviation")
 #' @return List with chi-squared statistics, p-values, and diagnostic info
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' eta <- getEta(fit, H = H)
+#' result <- getChisq_BQQ(eta, w = 20)
+#' }
 #' @export
 getChisq_BQQ <- function(eta, w = 0, use_differencing = FALSE,
                          df_method = "reduced", p_method = "empirical_null",
@@ -587,7 +621,6 @@ getChisq_BQQ <- function(eta, w = 0, use_differencing = FALSE,
 #' @param taus Quantile levels
 #' @param l Block length (for converting H-column to observation)
 #' @param w Warm-up period
-#' @param threshold Threshold for gamma L2 norm to declare significance
 #' @param signal_position Method to determine signal position within a significant block:
 #'   - "first": First observation in the block (default)
 #'   - "last": Last observation in the block
@@ -603,6 +636,17 @@ getChisq_BQQ <- function(eta, w = 0, use_differencing = FALSE,
 #'   "greater" tests H1: gamma > 0 (positive shift). "less" tests H1: gamma < 0 (negative shift).
 #' @param seed Random seed (only used when generating new Laplace samples)
 #' @return List with change-point detection results
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' result <- detectChangepoints_gamma(fit, taus = taus, l = 20, w = 20)
+#' }
 #' @export
 detectChangepoints_gamma <- function(fit_result, taus, l, w,
                                      signal_position = c("first", "last", "middle", "max_deviation"),
@@ -898,6 +942,18 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
 #' @param true_shift True shift observation (optional)
 #' @param main Plot title
 #' @param method Multiple testing correction to highlight: "holm" (default), "bonf", or "bh"
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' result <- detectChangepoints_gamma(fit, taus = taus, l = 20, w = 20)
+#' plot_gamma_detection(result)
+#' }
 #' @export
 plot_gamma_detection <- function(result, true_shift = NULL,
                                  main = "Gamma-Based Change-Point Detection",
@@ -981,6 +1037,18 @@ plot_gamma_detection <- function(result, true_shift = NULL,
 #' @param eta 3D array [iterations, quantiles, time] from getEta()
 #' @param taus Vector of quantile levels (must include 0.05, 0.25, 0.5, 0.75, 0.95 or similar)
 #' @return 3D array [iterations, 4, time] containing QSS statistics
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.05, 0.25, 0.5, 0.75, 0.95)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' eta <- getEta(fit, H = H)
+#' qss <- getQSS(eta, taus = taus)
+#' }
 #' @export
 getQSS <- function(eta, taus = c(0.05, 0.25, 0.5, 0.75, 0.95)) {
 
@@ -1054,6 +1122,19 @@ getQSS <- function(eta, taus = c(0.05, 0.25, 0.5, 0.75, 0.95)) {
 #' @param y Original data (required only for signal_position = "max_deviation")
 #' @param taus Quantile levels (required only for signal_position = "max_deviation")
 #' @return List with chi-squared statistics and diagnostic info
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.05, 0.25, 0.5, 0.75, 0.95)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' eta <- getEta(fit, H = H)
+#' qss <- getQSS(eta, taus = taus)
+#' result <- getChisq_QSS(qss, w = 20)
+#' }
 #' @export
 getChisq_QSS <- function(qss, w = 0, use_differencing = FALSE,
                           df_method = "reduced", p_method = "chisq",
@@ -1087,6 +1168,18 @@ getChisq_QSS <- function(qss, w = 0, use_differencing = FALSE,
 #' @param true_shift True shift point (optional, for simulation)
 #' @param alpha Significance level for highlighting signals
 #' @param main Plot title
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' eta <- getEta(fit, H = H)
+#' plot_quantile_chart(y, eta, taus, w = 20)
+#' }
 #' @export
 plot_quantile_chart <- function(y, eta, taus, w = 0, chisq_result = NULL,
                                 true_shift = NULL, alpha = 0.05,
@@ -1134,6 +1227,19 @@ plot_quantile_chart <- function(y, eta, taus, w = 0, chisq_result = NULL,
 #' @param w Warm-up period
 #' @param true_shift True shift point (optional)
 #' @param main Plot title
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' eta <- getEta(fit, H = H)
+#' chisq_result <- getChisq_BQQ(eta, w = 20)
+#' plot_chisq_chart(chisq_result, w = 20)
+#' }
 #' @export
 plot_chisq_chart <- function(chisq_result, w = 0, true_shift = NULL,
                              main = "Chi-Squared Control Chart") {
@@ -1182,6 +1288,19 @@ plot_chisq_chart <- function(chisq_result, w = 0, true_shift = NULL,
 #' @param w Warm-up period
 #' @param true_shift True shift point (optional)
 #' @param main_prefix Prefix for subplot titles
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.05, 0.25, 0.5, 0.75, 0.95)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' eta <- getEta(fit, H = H)
+#' qss <- getQSS(eta, taus = taus)
+#' plot_qss_series(qss, w = 20)
+#' }
 #' @export
 plot_qss_series <- function(qss, w = 0, true_shift = NULL,
                              main_prefix = "") {

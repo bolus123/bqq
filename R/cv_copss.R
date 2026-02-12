@@ -48,7 +48,7 @@ pinball_loss <- function(y_val, qhat, taus) {
 #' @return A data.frame of grid values and CV losses (lower is better), sorted by val_loss.
 #'
 #' @examples
-#' \dontrun{
+#' \donttest{
 #' set.seed(123)
 #' n <- 200
 #' y <- rnorm(n)
@@ -216,6 +216,17 @@ cv_copss_map <- function(y, taus, H, X = NULL, w,
 #'
 #' @return data.frame with grid and CV losses.
 #'
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 200
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getSustainedShift(n, l = 20, w = 30)
+#' grid <- data.frame(lambda_nc = c(2, 5, 10))
+#' cv_result <- cv_copss_grid(y = y, taus = taus, H = H, w = 30, grid = grid)
+#' }
+#'
 #' @export
 cv_copss_grid <- function(y, taus, H, X = NULL, w, grid,
                               base_args = list(),
@@ -375,6 +386,18 @@ cv_copss_grid <- function(y, taus, H, X = NULL, w, grid,
 #' @param verbose Print progress.
 #'
 #' @return data.frame with grid and CV losses.
+#'
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 200
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getSustainedShift(n, l = 20, w = 30)
+#' grid <- data.frame(lambda_nc = c(2, 5))
+#' cv_result <- cv_copss_mcmc(y = y, taus = taus, H = H, w = 30, grid = grid,
+#'                             mcmc_warmup = 100, mcmc_draws = 100)
+#' }
 #'
 #' @export
 cv_copss_mcmc <- function(y, taus, H, X = NULL, w, grid,

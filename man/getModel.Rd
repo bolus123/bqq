@@ -64,6 +64,12 @@ coefficients \eqn{\gamma}. If \eqn{r = 0}, pass a zero-column matrix.}
 
 \item{w}{Integer \eqn{\ge 1}. Used for initial quantile estimation from first w observations.}
 
+\item{alpha}{Positive scalar exponent for adaptive LASSO weights (default 0.75).}
+
+\item{eps_w}{Positive scalar added to pilot estimates for numerical stability (default 1e-3).}
+
+\item{c_sigma}{Positive scalar scaling factor for the base scale (default 1.0).}
+
 \item{beta_sd}{Positive scalar prior std dev for \code{beta} coefficients (default 1.0).}
 
 \item{lambda_nc}{Positive scalar weight for the non-crossing penalty (larger is stricter).}
@@ -172,6 +178,18 @@ outer quantiles by penalizing differences between adjacent quantile coefficients
 }
 }
 
+\examples{
+\donttest{
+set.seed(123)
+n <- 100
+y <- rnorm(n)
+taus <- c(0.25, 0.5, 0.75)
+H <- getIsolatedShift(n, l = 20, w = 20)
+fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+                map_hessian = FALSE, map_iter = 500)
+}
+
+}
 \references{
 Jiang, L., Wang, H. J., & Bondell, H. D. (2013). Interquantile Shrinkage in Regression Models.
 Journal of Computational and Graphical Statistics, 22(4), 970-986.

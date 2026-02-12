@@ -50,7 +50,7 @@ List with chi-squared statistics, p-values, and diagnostic info
 }
 \description{
 Implements the chi-squared-inspired charting statistic from the BQQ methodology:
-W_t = Z_t' * S^{-1} * Z_t
+\eqn{W_t = Z_t' S^{-1} Z_t}
 where Z_t = mean(Z_tr) across posterior draws r.
 }
 \details{
@@ -58,4 +58,17 @@ The covariance S is estimated from the warm-up period to reflect the natural
 variability under the null hypothesis (no change point). This captures both:
 1. Posterior uncertainty in parameter estimates
 2. Natural temporal variability from the random walk component
+}
+\examples{
+\donttest{
+set.seed(123)
+n <- 100
+y <- rnorm(n)
+taus <- c(0.25, 0.5, 0.75)
+H <- getIsolatedShift(n, l = 20, w = 20)
+fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+                map_hessian = FALSE, map_iter = 500)
+eta <- getEta(fit, H = H)
+result <- getChisq_BQQ(eta, w = 20)
+}
 }

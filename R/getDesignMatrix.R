@@ -5,10 +5,10 @@
 #' *sustained* level shifts that persist once they occur (e.g., interventions,
 #' regime changes, or structural breaks).
 #'
-#' @param n Integer \(\ge 1\). Number of rows (time points or observations).
-#' @param l Integer \(\ge 1\). Nominal block length. Columns are created every
+#' @param n Integer \eqn{\ge 1}. Number of rows (time points or observations).
+#' @param l Integer \eqn{\ge 1}. Nominal block length. Columns are created every
 #'   \code{l} positions after the warm-up; the last block may be shorter to reach \code{n}.
-#' @param w Integer \(\ge 0\). Warm-up (initial zeros). No columns start before
+#' @param w Integer \eqn{\ge 0}. Warm-up (initial zeros). No columns start before
 #'   row \code{w + 1}. Defaults to \code{0}.
 #'
 #' @details
@@ -52,10 +52,10 @@ getSustainedShift <- function(n, l, w = 0) {
 #' and 0 elsewhere. Useful for modeling *transient* or *windowed* effects
 #' (e.g., short interventions, windowed basis functions).
 #'
-#' @param n Integer \(\ge 1\). Number of rows (time points or observations).
-#' @param l Integer \(\ge 1\). Block length for each column. The last block
+#' @param n Integer \eqn{\ge 1}. Number of rows (time points or observations).
+#' @param l Integer \eqn{\ge 1}. Block length for each column. The last block
 #'   may be shorter if it would exceed \code{n}.
-#' @param w Integer \(\ge 0\). Warm-up (initial zeros). No columns start before
+#' @param w Integer \eqn{\ge 0}. Warm-up (initial zeros). No columns start before
 #'   row \code{w + 1}. Defaults to \code{0}.
 #'
 #' @details

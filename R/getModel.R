@@ -38,6 +38,9 @@
 #' @param w Integer \eqn{\ge 1}. Used for initial quantile estimation from first w observations.
 #' @param X Optional numeric matrix \eqn{n \times p_x} of additional predictors.
 #' @param offset Optional numeric vector of length \eqn{n} added to the linear predictor.
+#' @param alpha Positive scalar exponent for adaptive LASSO weights (default 0.75).
+#' @param eps_w Positive scalar added to pilot estimates for numerical stability (default 1e-3).
+#' @param c_sigma Positive scalar scaling factor for the base scale (default 1.0).
 #' @param beta_sd Positive scalar prior std dev for \code{beta} coefficients (default 1.0).
 #' @param lambda_nc Positive scalar weight for the non-crossing penalty (larger is stricter).
 #' @param adaptive_iq Logical; if TRUE (default), the IQ shrinkage rate lambda_iq2
@@ -91,8 +94,22 @@
 #' Jiang, L., Wang, H. J., & Bondell, H. D. (2013). Interquantile Shrinkage in Regression Models.
 #' Journal of Computational and Graphical Statistics, 22(4), 970-986.
 #'
+#' @examples
+#' \donttest{
+#' set.seed(123)
+#' n <- 100
+#' y <- rnorm(n)
+#' taus <- c(0.25, 0.5, 0.75)
+#' H <- getIsolatedShift(n, l = 20, w = 20)
+#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+#'                 map_hessian = FALSE, map_iter = 500)
+#' }
+#'
 #' @importFrom rstan stan_model sampling stan
-#' @importFrom stats lm resid sd
+#' @importFrom stats lm resid sd rnorm quantile mad median coef cov pchisq qchisq p.adjust
+#' @importFrom graphics plot lines points abline polygon legend par barplot
+#' @importFrom grDevices rgb rainbow
+#' @importFrom MASS ginv
 #' @export
 getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
                         alpha = 0.75, eps_w = 1e-3, c_sigma = 1.0,
@@ -817,9 +834,8 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         arr
       }
 
-      beta_array <- if (length(beta_idx) > 0) {
-        # For fallback, find beta in the full par_names (not just raw)
-        beta_full_idx <- grep("^beta\\[", par_names)
+      beta_full_idx <- grep("^beta\\[", par_names)
+      beta_array <- if (length(beta_full_idx) > 0) {
         beta_full_parsed <- parse_2d_idx(par_names, beta_full_idx, "beta")
         m_beta <- max(beta_full_parsed$row); p_beta <- max(beta_full_parsed$col)
         beta_map <- matrix(NA, m_beta, p_beta)
@@ -830,8 +846,8 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         arr
       }
 
-      gamma_array <- if (length(gamma_idx) > 0) {
-        gamma_full_idx <- grep("^gamma\\[", par_names)
+      gamma_full_idx <- grep("^gamma\\[", par_names)
+      gamma_array <- if (length(gamma_full_idx) > 0) {
         gamma_full_parsed <- parse_2d_idx(par_names, gamma_full_idx, "gamma")
         m_gamma <- max(gamma_full_parsed$row); r_gamma <- max(gamma_full_parsed$col)
         gamma_map <- matrix(NA, m_gamma, r_gamma)

@@ -39,3 +39,15 @@ data.frame with grid and CV losses.
 \description{
 More flexible version that accepts a data.frame grid of hyperparameters.
 }
+\examples{
+\donttest{
+set.seed(123)
+n <- 200
+y <- rnorm(n)
+taus <- c(0.25, 0.5, 0.75)
+H <- getSustainedShift(n, l = 20, w = 30)
+grid <- data.frame(lambda_nc = c(2, 5, 10))
+cv_result <- cv_copss_grid(y = y, taus = taus, H = H, w = 30, grid = grid)
+}
+
+}

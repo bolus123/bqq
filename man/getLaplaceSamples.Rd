@@ -33,3 +33,15 @@ dimensions, we use a parametric bootstrap approach:
 1. Extract MAP estimates for mu, beta, gamma
 2. Add uncertainty based on estimated residual variance and parameter structure
 }
+\examples{
+\donttest{
+set.seed(123)
+n <- 100
+y <- rnorm(n)
+taus <- c(0.25, 0.5, 0.75)
+H <- getIsolatedShift(n, l = 20, w = 20)
+fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
+                map_hessian = FALSE, map_iter = 500)
+samples <- getLaplaceSamples(fit$map, n_samples = 100)
+}
+}

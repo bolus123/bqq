@@ -49,7 +49,7 @@ Scoring uses the average pinball (check) loss across all taus on the held-out fo
 IQ shrinkage uses its own penalty lambda_iq2 (adaptive or fixed).
 }
 \examples{
-\dontrun{
+\donttest{
 set.seed(123)
 n <- 200
 y <- rnorm(n)

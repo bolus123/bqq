@@ -1,7 +1,7 @@
 Package: bqq
 Type: Package
 Title: Bayesian Quintuple Quantile Chart
-Version: 0.2.1
+Version: 0.2.3
 Authors@R: c(
     person(
       "Yuhui", "Yao",
@@ -9,8 +9,19 @@ Authors@R: c(
       role = c("aut", "cre")
     )
   )
-Description: Bayesian Quintuple Quantile Chart
+Description: Implements a Bayesian quintuple quantile charting approach
+    for Phase I statistical process monitoring. Fits bayesian multi-quantile regression models 
+    with interquantile shrinkage, Bayesian LASSO, and non-crossing penalties via 'Stan'. 
+    Provides Bayesian quintuple quantile control charts and quantile shape statistics for various shifts.
 License: GPL-3
 Encoding: UTF-8
-LazyData: true
+Depends: R (>= 3.5.0)
+Imports:
+    graphics,
+    grDevices,
+    MASS,
+    rstan (>= 2.21.0),
+    stats
+Suggests:
+    quantreg
 RoxygenNote: 7.3.3

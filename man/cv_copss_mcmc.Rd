@@ -46,3 +46,16 @@ data.frame with grid and CV losses.
 Uses MCMC with shorter draws instead of MAP for hyperparameter selection.
 This can improve results when MAP estimation is unreliable.
 }
+\examples{
+\donttest{
+set.seed(123)
+n <- 200
+y <- rnorm(n)
+taus <- c(0.25, 0.5, 0.75)
+H <- getSustainedShift(n, l = 20, w = 30)
+grid <- data.frame(lambda_nc = c(2, 5))
+cv_result <- cv_copss_mcmc(y = y, taus = taus, H = H, w = 30, grid = grid,
+                            mcmc_warmup = 100, mcmc_draws = 100)
+}
+
+}
