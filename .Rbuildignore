@@ -4,3 +4,6 @@
 ^\.gitignore$
 ^\.gitattributes$
 ^\.claude$
+^simulation_study$
+^bqq_toy_example\.R$
+^README\.md$
