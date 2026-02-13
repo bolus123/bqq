@@ -18,10 +18,14 @@
 #'     }
 #'   }
 #'   \item{Interquantile shrinkage}{
-#'     Penalizes differences between adjacent quantile coefficients for gamma and beta slopes:
-#'     \eqn{\text{pen}_{\text{IQ}} = \sum_{q=2}^m w_q (|\gamma_{q} - \gamma_{q-1}| + |\beta_{q}^{slope} - \beta_{q-1}^{slope}|)}
-#'     where \eqn{w_q = 1/\sqrt{\tau_q(1-\tau_q)\tau_{q-1}(1-\tau_{q-1})}} gives more weight to outer quantiles.
-#'     This stabilizes outer quantiles by borrowing strength from inner quantiles.
+#'     Penalizes differences between adjacent quantile coefficients for gamma and beta slopes
+#'     using data-driven adaptive weights from pilot quantile regression estimates:
+#'     \eqn{\text{pen}_{\text{IQ}} = \sum_{q=2}^m \sum_j w_{q,j} |\theta_{q,j} - \theta_{q-1,j}|}
+#'     where \eqn{w_{q,j} = (|\tilde{\theta}_{q,j} - \tilde{\theta}_{q-1,j}| + \epsilon_w)^{-1}}
+#'     and \eqn{\tilde{\theta}} are pilot estimates from separate quantile regressions
+#'     (Jiang, Wang, & Bondell 2013).
+#'     Weights are median-normalized for scale invariance and applied separately to gamma and beta slopes.
+#'     Falls back to uniform weights (all 1) when quantreg is not available.
 #'     Note: Intercept is NOT penalized (per Jiang, Wang, & Bondell 2013).
 #'     Note: mu (random walk) is NOT penalized to allow quantile-specific temporal evolution.
 #'   }
@@ -39,7 +43,8 @@
 #' @param X Optional numeric matrix \eqn{n \times p_x} of additional predictors.
 #' @param offset Optional numeric vector of length \eqn{n} added to the linear predictor.
 #' @param alpha Positive scalar exponent for adaptive LASSO weights (default 0.75).
-#' @param eps_w Positive scalar added to pilot estimates for numerical stability (default 1e-3).
+#' @param eps_w Positive scalar added to pilot estimates for numerical stability
+#'   in both adaptive LASSO weights and IQ shrinkage weights (default 1e-3).
 #' @param c_sigma Positive scalar scaling factor for the base scale (default 1.0).
 #' @param beta_sd Positive scalar prior std dev for \code{beta} coefficients (default 1.0).
 #' @param lambda_nc Positive scalar weight for the non-crossing penalty (larger is stricter).
@@ -183,6 +188,43 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     (abs(gamma_hat) + eps_w)^(-alpha)
   }
 
+  safe_pilot_coefs <- function(y, Z, tau, eps_w = 1e-3, lambda_lasso = NULL) {
+    d <- ncol(Z)
+    if (d == 0) return(numeric(0))
+
+    fit_q <- try(
+      suppressWarnings(quantreg::rq(y ~ Z - 1, tau = tau, method = "fn")),
+      silent = TRUE
+    )
+
+    if (inherits(fit_q, "try-error")) {
+      n <- length(y)
+      if (is.null(lambda_lasso)) {
+        lambda_lasso <- sqrt(log(d + 1L) / n)
+      }
+      fit_q <- try(
+        suppressWarnings(
+          quantreg::rq(y ~ Z - 1, tau = tau,
+                       method = "lasso", lambda = lambda_lasso)
+        ),
+        silent = TRUE
+      )
+      if (inherits(fit_q, "try-error")) {
+        warning("Both rq(method = 'fn') and rq(method = 'lasso') failed at tau=",
+                tau, "; using zero pilot coefficients.")
+        return(rep(0, d))
+      }
+    }
+
+    coef_hat <- as.numeric(stats::coef(fit_q))
+    if (length(coef_hat) != d) {
+      warning("Pilot fit returned length mismatch at tau=", tau,
+              "; using zero pilot coefficients.")
+      return(rep(0, d))
+    }
+    coef_hat
+  }
+
   n <- length(y)
 
   stan_code <- "
@@ -232,6 +274,11 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       real<lower=0> slab_sd;
       real<lower=0> slab_pi_a;
       real<lower=0> slab_pi_b;
+
+      // Data-driven IQ shrinkage weights (from pilot quantile regressions)
+      int<lower=0> p_slope;
+      matrix[m-1, r] w_iq_gamma;
+      matrix[m-1, p_slope] w_iq_beta;
   }
 
   transformed data {
@@ -267,20 +314,8 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         L_Gs = rep_matrix(0, 0, 0);
       }
 
-      // Precompute interquantile shrinkage weights: w_iq[q] for q = 2,...,m
-      // Weight = 1 / sqrt(tau_q * (1-tau_q) * tau_{q-1} * (1-tau_{q-1}))
-      // This gives MORE weight (more shrinkage) to outer quantiles
-      vector[m-1] w_iq_vec;
-      for (q in 2:m) {
-        real var_q   = tau_q[q] * (1 - tau_q[q]);
-        real var_qm1 = tau_q[q-1] * (1 - tau_q[q-1]);
-        w_iq_vec[q-1] = 1.0 / sqrt(var_q * var_qm1);
-      }
-      // Normalize so median weight is 1
-      real w_iq_median = w_iq_vec[(m-1) / 2 + 1];
-      for (q in 1:(m-1)) {
-        w_iq_vec[q] = w_iq_vec[q] / w_iq_median;
-      }
+      // IQ shrinkage weights are now data-driven (passed as w_iq_gamma, w_iq_beta)
+      // Computed from pilot quantile regression estimates in R
   }
 
   parameters {
@@ -493,7 +528,7 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
           if (r > 0) {
             for (j in 1:r) {
               for (q in 2:m) {
-                pen_iq_gamma += w_iq_vec[q-1] * fabs(gamma[q, j] - gamma[q-1, j]);
+                pen_iq_gamma += w_iq_gamma[q-1, j] * fabs(gamma[q, j] - gamma[q-1, j]);
               }
             }
             pen_iq_gamma /= (r * (m - 1));
@@ -503,13 +538,13 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
           // Penalty on beta (X-coefficients EXCLUDING intercept)
           // Note: Column 1 of X is the intercept - do NOT penalize it
           // (Jiang, Wang, & Bondell 2013 only penalize slope coefficients)
-          if (p > 1) {
-            for (j in 2:p) {  // Start from 2 to skip intercept
+          if (p_slope > 0) {
+            for (j in 1:p_slope) {
               for (q in 2:m) {
-                pen_iq_beta += w_iq_vec[q-1] * fabs(beta[q, j] - beta[q-1, j]);
+                pen_iq_beta += w_iq_beta[q-1, j] * fabs(beta[q, j+1] - beta[q-1, j+1]);
               }
             }
-            pen_iq_beta /= ((p - 1) * (m - 1));
+            pen_iq_beta /= (p_slope * (m - 1));
             n_components += 1;
           }
 
@@ -598,6 +633,53 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     }
   }
 
+  # ---- IQ weight matrices construction (data-driven adaptive weights) ----
+  p_slope <- max(p - 1L, 0L)
+  w_iq_gamma <- matrix(1, nrow = m - 1L, ncol = max(r, 0L))
+  w_iq_beta  <- matrix(1, nrow = m - 1L, ncol = max(p_slope, 0L))
+
+  if ((r > 0 || p_slope > 0) && requireNamespace("quantreg", quietly = TRUE)) {
+    Z_pilot <- if (r > 0) cbind(X, H) else X
+    d_pilot <- ncol(Z_pilot)
+
+    pilot_coefs <- matrix(NA, nrow = m, ncol = d_pilot)
+    for (q in seq_len(m)) {
+      pilot_coefs[q, ] <- safe_pilot_coefs(
+        y = y, Z = Z_pilot, tau = taus[q], eps_w = eps_w
+      )
+    }
+
+    if (r > 0) {
+      gamma_pilot <- pilot_coefs[, (p + 1):(p + r), drop = FALSE]
+      for (q in 2:m) {
+        for (j in seq_len(r)) {
+          diff_val <- abs(gamma_pilot[q, j] - gamma_pilot[q - 1, j])
+          w_iq_gamma[q - 1, j] <- (diff_val + eps_w)^(-1)
+        }
+      }
+      med_w_iq_gamma <- stats::median(w_iq_gamma)
+      if (is.finite(med_w_iq_gamma) && med_w_iq_gamma > 0) {
+        w_iq_gamma <- w_iq_gamma / med_w_iq_gamma
+      }
+    }
+
+    if (p_slope > 0) {
+      beta_pilot <- pilot_coefs[, 2:p, drop = FALSE]
+      for (q in 2:m) {
+        for (j in seq_len(p_slope)) {
+          diff_val <- abs(beta_pilot[q, j] - beta_pilot[q - 1, j])
+          w_iq_beta[q - 1, j] <- (diff_val + eps_w)^(-1)
+        }
+      }
+      med_w_iq_beta <- stats::median(w_iq_beta)
+      if (is.finite(med_w_iq_beta) && med_w_iq_beta > 0) {
+        w_iq_beta <- w_iq_beta / med_w_iq_beta
+      }
+    }
+  } else if ((r > 0 || p_slope > 0) && !requireNamespace("quantreg", quietly = TRUE)) {
+    warning("Package 'quantreg' not available; using uniform IQ shrinkage weights.")
+  }
+
 
   stan_data <- list(
     n = n, p = p, m = m, r = r,
@@ -618,7 +700,10 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     spike_sd = spike_sd,
     slab_sd  = slab_sd,
     slab_pi_a = slab_pi_a,
-    slab_pi_b = slab_pi_b
+    slab_pi_b = slab_pi_b,
+    p_slope = as.integer(p_slope),
+    w_iq_gamma = if (r > 0) w_iq_gamma else matrix(0, m - 1L, 0L),
+    w_iq_beta  = if (p_slope > 0) w_iq_beta else matrix(0, m - 1L, 0L)
   )
 
   # Compile Stan model once
