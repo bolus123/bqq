@@ -345,7 +345,8 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       real<lower=0, upper=1> pi_slab;
 
       // Group-level mixer for hetero group lasso (Levy)
-      vector<lower=0>[m] omega_group;
+      // One per time block (consistent with group lasso grouping)
+      vector<lower=0>[r] omega_group;
 
       // jitter variable
       vector<lower=1e-12, upper = 1>[n] u;
@@ -468,12 +469,15 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
           }
 
         // 4 = heterogeneous group lasso with Levy mixing
+        // Groups by time block (consistent with group lasso prior_code=1)
+        // omega_group[i]: block-level Levy scale (one per time block)
+        // tau_gamma[j, i]: element-specific scale (one per quantile x block)
         } else if (prior_code == 4) {
           real c_levy = lambda_lasso2_eff / 2;
-          for (j in 1:m) {
-            omega_group[j] ~ inv_gamma(0.5, 0.5 * c_levy);
-            for (i in 1:r) {
-              tau_gamma[j, i] ~ exponential(0.5 * square(omega_group[j] * w_gamma[j, i]));
+          for (i in 1:r) {
+            omega_group[i] ~ inv_gamma(0.5, 0.5 * c_levy);
+            for (j in 1:m) {
+              tau_gamma[j, i] ~ exponential(0.5 * square(omega_group[i] * w_gamma[j, i]));
               gamma[j, i] ~ normal(0, sqrt(tau_gamma[j, i]));
             }
           }
@@ -772,7 +776,7 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     # Parse dimensions from parameter names
     z_incr_parsed <- if (length(z_incr_idx) > 0) parse_2d_idx(raw_par_names, z_incr_idx, "z_incr") else NULL
     mu0_parsed    <- if (length(mu0_idx) > 0) {
-      # mu0 is a vector: mu0[1], mu0[2], ... — parse as 1D
+      # mu0 is a vector: mu0[1], mu0[2], ... - parse as 1D
       dims_str <- gsub("mu0\\[|\\]", "", raw_par_names[mu0_idx])
       list(idx = as.integer(dims_str))
     } else NULL
