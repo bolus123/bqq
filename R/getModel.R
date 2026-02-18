@@ -116,6 +116,12 @@
 #' @importFrom grDevices rgb rainbow
 #' @importFrom MASS ginv
 #' @export
+#
+# --- Session-level cache for compiled Stan model ---
+# The Stan code is a fixed string; only stan_data changes between calls.
+# Compiling once per R session avoids redundant 30-60s compilations.
+.bqq_stan_cache <- new.env(parent = emptyenv())
+
 getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
                         alpha = 0.75, eps_w = 1e-3, c_sigma = 1.0,
                         beta_sd = 1.0,
@@ -710,8 +716,12 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
     w_iq_beta  = if (p_slope > 0) w_iq_beta else matrix(0, m - 1L, 0L)
   )
 
-  # Compile Stan model once
-  sm <- rstan::stan_model(model_code = stan_code)
+  # Compile Stan model once per session (cached)
+  if (is.null(.bqq_stan_cache$sm)) {
+    if (verbose) message("Compiling BQQ Stan model (one-time per session)...")
+    .bqq_stan_cache$sm <- rstan::stan_model(model_code = stan_code)
+  }
+  sm <- .bqq_stan_cache$sm
 
   # Initialize outputs
   fit <- NULL
