@@ -621,6 +621,7 @@ getChisq_BQQ <- function(eta, w = 0, use_differencing = FALSE,
 #' @param taus Quantile levels
 #' @param l Block length (for converting H-column to observation)
 #' @param w Warm-up period
+#' @param threshold Threshold for gamma L2 norm to declare significance
 #' @param signal_position Method to determine signal position within a significant block:
 #'   - "first": First observation in the block (default)
 #'   - "last": Last observation in the block
@@ -634,25 +635,18 @@ getChisq_BQQ <- function(eta, w = 0, use_differencing = FALSE,
 #' @param alternative Direction of the test: "two.sided" (default), "greater", or "less".
 #'   Matches R's t.test convention. "two.sided" uses decorrelated L2-norm magnitude test.
 #'   "greater" tests H1: gamma > 0 (positive shift). "less" tests H1: gamma < 0 (negative shift).
+#' @param whiten Logical (default TRUE). If TRUE, apply whitening (decorrelation via
+#'   Cholesky decomposition of the posterior covariance) to gamma samples before
+#'   computing test statistics. If FALSE, use raw gamma samples directly.
 #' @param seed Random seed (only used when generating new Laplace samples)
 #' @return List with change-point detection results
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.25, 0.5, 0.75)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' result <- detectChangepoints_gamma(fit, taus = taus, l = 20, w = 20)
-#' }
 #' @export
 detectChangepoints_gamma <- function(fit_result, taus, l, w,
                                      signal_position = c("first", "last", "middle", "max_deviation"),
                                      y = NULL, eta = NULL,
                                      n_samples = 1000, alpha = 0.05,
                                      alternative = "two.sided",
+                                     whiten = TRUE,
                                      seed = NULL) {
 
   # Validate signal_position argument
@@ -709,69 +703,65 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
   # ============================================================
   # Step 1: Decorrelation via Whitening Transformation
   # ============================================================
-  # Vectorize gamma: reshape from (n_iter x m x r) to (n_iter x d) where d = m * r
-  # gamma_vec[s, ] = (gamma[s,1,1], gamma[s,2,1], ..., gamma[s,m,1], gamma[s,1,2], ..., gamma[s,m,r])
-  d <- m * r
-  gamma_vec <- matrix(NA, n_iter, d)
-  for (s in 1:n_iter) {
-    gamma_vec[s, ] <- as.vector(gamma_samples[s, , ])  # columns stacked: (m x r) -> (d,)
-  }
+  Sigma <- NULL
+  Sigma_inv_sqrt <- NULL
 
-  # Compute posterior covariance matrix
-  Sigma <- cov(gamma_vec)
+  if (whiten) {
+    # Vectorize gamma: reshape from (n_iter x m x r) to (n_iter x d) where d = m * r
+    d <- m * r
+    gamma_vec <- matrix(NA, n_iter, d)
+    for (s in 1:n_iter) {
+      gamma_vec[s, ] <- as.vector(gamma_samples[s, , ])
+    }
 
-  # Compute whitening transformation using Cholesky decomposition (faster than eigendecomposition)
-  # If Sigma = L L', then L^{-1} gamma gives uncorrelated samples with unit variance
-  # Add small ridge for numerical stability
-  ridge <- 1e-8 * diag(d)
-  Sigma_reg <- Sigma + ridge
+    # Compute posterior covariance matrix
+    Sigma <- cov(gamma_vec)
 
-  # Cholesky decomposition: Sigma_reg = L L'
-  chol_result <- tryCatch({
-    chol(Sigma_reg)  # Returns upper triangular R where Sigma = R'R
-  }, error = function(e) {
-    # Fallback to eigendecomposition if Cholesky fails
-    warning("Cholesky decomposition failed, falling back to eigendecomposition")
-    NULL
-  })
+    # Whitening transformation using Cholesky (faster) or eigendecomposition (fallback)
+    ridge <- 1e-8 * diag(d)
+    Sigma_reg <- Sigma + ridge
 
-  if (!is.null(chol_result)) {
-    # chol() returns upper triangular R where Sigma = R'R
-    # Whitening: solve(R', gamma') which decorrelates the samples
-    # gamma_tilde = gamma %*% solve(R) equivalently
-    R <- chol_result
-    gamma_tilde_vec <- t(backsolve(R, t(gamma_vec), transpose = TRUE))
-    Sigma_inv_sqrt <- backsolve(R, diag(d))  # R^{-1} for output (approximate Sigma^{-1/2})
+    chol_result <- tryCatch({
+      chol(Sigma_reg)
+    }, error = function(e) {
+      warning("Cholesky decomposition failed, falling back to eigendecomposition")
+      NULL
+    })
+
+    if (!is.null(chol_result)) {
+      R <- chol_result
+      gamma_tilde_vec <- t(backsolve(R, t(gamma_vec), transpose = TRUE))
+      Sigma_inv_sqrt <- backsolve(R, diag(d))
+    } else {
+      eig <- eigen(Sigma_reg, symmetric = TRUE)
+      eigenvalues <- pmax(eig$values, 1e-8)
+      eigenvectors <- eig$vectors
+      Sigma_inv_sqrt <- eigenvectors %*% diag(1 / sqrt(eigenvalues)) %*% t(eigenvectors)
+      gamma_tilde_vec <- t(Sigma_inv_sqrt %*% t(gamma_vec))
+    }
+
+    # Reshape back to (n_iter x m x r)
+    gamma_tilde <- array(NA, dim = c(n_iter, m, r))
+    for (s in 1:n_iter) {
+      gamma_tilde[s, , ] <- matrix(gamma_tilde_vec[s, ], nrow = m, ncol = r)
+    }
   } else {
-    # Fallback: eigendecomposition (more stable for ill-conditioned matrices)
-    eig <- eigen(Sigma_reg, symmetric = TRUE)
-    eigenvalues <- pmax(eig$values, 1e-8)
-    eigenvectors <- eig$vectors
-    Sigma_inv_sqrt <- eigenvectors %*% diag(1 / sqrt(eigenvalues)) %*% t(eigenvectors)
-    gamma_tilde_vec <- t(Sigma_inv_sqrt %*% t(gamma_vec))
-  }
-
-  # Reshape back to (n_iter x m x r)
-  gamma_tilde <- array(NA, dim = c(n_iter, m, r))
-  for (s in 1:n_iter) {
-    gamma_tilde[s, , ] <- matrix(gamma_tilde_vec[s, ], nrow = m, ncol = r)
+    # No whitening: use raw gamma samples directly
+    gamma_tilde <- gamma_samples
   }
 
   # ============================================================
   # Step 2: Per-Quantile, Per-Block Test Statistic
   # ============================================================
-  # T_{q,j}^{(s)} = gamma_tilde[s, q, j]  (the decorrelated gamma itself)
-  # gamma_tilde already has shape (n_iter x m x r), so no new computation needed.
+  # T_{q,j}^{(s)} = gamma_tilde[s, q, j]
+  # When whiten=TRUE, gamma_tilde is decorrelated.
+  # When whiten=FALSE, gamma_tilde is the raw gamma.
 
-  # Null threshold: Under H0 (no shift), gamma = 0
-  # We test against 0, not a data-driven threshold
-  epsilon <- rep(0, m)  # Null hypothesis: gamma = 0
+  epsilon <- rep(0, m)
 
   # ============================================================
   # Step 3: Per-Quantile, Per-Block Bayesian Posterior P-Values
   # ============================================================
-  # Compute posterior p-value: P(gamma_tilde <= 0 | data) for each (q, j)
-  # This tests whether the posterior mass is above or below 0
   pvalue_star <- matrix(NA, m, r)
   for (q in 1:m) {
     for (j in 1:r) {
@@ -779,40 +769,33 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
     }
   }
 
-  # Directional p-values (respecting the 'alternative' parameter)
-  # Two-sided: reject if posterior is concentrated far from 0 (either side)
-  # Greater: reject if posterior is concentrated above 0 (small pvalue_star)
-  # Less: reject if posterior is concentrated below 0 (large pvalue_star)
+  # Directional p-values
   if (alternative == "two.sided") {
     pvalue_qj <- 2 * pmin(pvalue_star, 1 - pvalue_star)
   } else if (alternative == "greater") {
-    # H1: gamma > 0, so p-value = P(gamma <= 0 | data) = pvalue_star
     pvalue_qj <- pvalue_star
   } else if (alternative == "less") {
-    # H1: gamma < 0, so p-value = P(gamma >= 0 | data) = 1 - pvalue_star
     pvalue_qj <- 1 - pvalue_star
   } else {
     stop("Unknown alternative: ", alternative, ". Must be 'two.sided', 'less', or 'greater'.")
   }
 
-  # Apply multiple testing corrections across ALL m*r p-values jointly
-  pvalue_vec <- as.vector(pvalue_qj)  # length m*r (column-major: q varies fastest)
+  # Multiple testing corrections across ALL m*r p-values jointly
+  pvalue_vec <- as.vector(pvalue_qj)
   adjp_holm_vec <- p.adjust(pvalue_vec, method = "holm")
   adjp_bonf_vec <- p.adjust(pvalue_vec, method = "bonferroni")
   adjp_bh_vec <- p.adjust(pvalue_vec, method = "BH")
 
-  # Reshape back to m x r matrices
   adjp_holm <- matrix(adjp_holm_vec, m, r)
   adjp_bonf <- matrix(adjp_bonf_vec, m, r)
   adjp_bh <- matrix(adjp_bh_vec, m, r)
 
-  # Block-level decision: block j significant if ANY quantile significant after correction
+  # Block-level decision: block j significant if ANY quantile significant
   sig_blocks_raw <- which(apply(pvalue_qj < alpha, 2, any))
   significant_holm <- which(apply(adjp_holm < alpha, 2, any))
   significant_bonf <- which(apply(adjp_bonf < alpha, 2, any))
   significant_bh <- which(apply(adjp_bh < alpha, 2, any))
 
-  # Per-block summary p-value: minimum across quantiles (for backward compat)
   pvalue_posterior <- apply(pvalue_qj, 2, min)
 
   # Convert H column to observation number
@@ -822,7 +805,7 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
     c(obs_start, obs_end)
   }
 
-  # Helper function to determine signal observation within a block
+  # Helper: determine signal observation within a block
   get_signal_obs <- function(h_col, position_method, y_data = NULL, eta_data = NULL, tau_levels = NULL) {
     obs_range <- h_to_obs(h_col)
     obs_start <- obs_range[1]
@@ -830,36 +813,23 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
 
     if (position_method == "first") {
       return(obs_start)
-
     } else if (position_method == "last") {
       return(obs_end)
-
     } else if (position_method == "middle") {
       return(floor((obs_start + obs_end) / 2))
-
     } else if (position_method == "max_deviation") {
-      # Find observation with maximum deviation from the predictive median (fitted eta at tau = 0.5)
       if (is.null(y_data) || is.null(eta_data)) {
         warning("y and eta required for max_deviation; using 'first' instead")
         return(obs_start)
       }
-
-      # Find the index of the median quantile (tau = 0.5)
       if (!is.null(tau_levels)) {
         median_idx <- which.min(abs(tau_levels - 0.5))
       } else {
-        # Fallback to middle index if taus not provided
         median_idx <- ceiling(dim(eta_data)[2] / 2)
       }
-
-      # Compute posterior mean of the predictive median (fitted eta at tau = 0.5)
       eta_median <- apply(eta_data[, median_idx, , drop = FALSE], 3, mean)
-
-      # Calculate deviations for observations in this block
       block_obs <- obs_start:obs_end
       deviations <- abs(y_data[block_obs] - eta_median[block_obs])
-
-      # Return observation with maximum deviation
       max_dev_idx <- which.max(deviations)
       return(block_obs[max_dev_idx])
     }
@@ -868,25 +838,20 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
   # Compile results
   detected_blocks <- data.frame(
     h_col = 1:r,
-    # Block-level summary p-value (min across quantiles)
     pvalue_posterior = pvalue_posterior,
-    # Block-level significance flags (after joint m*r correction)
     significant_raw = 1:r %in% sig_blocks_raw,
     significant_holm = 1:r %in% significant_holm,
     significant_bonf = 1:r %in% significant_bonf,
     significant_bh = 1:r %in% significant_bh
   )
 
-  # Add observation ranges
   detected_blocks$obs_start <- sapply(detected_blocks$h_col, function(j) h_to_obs(j)[1])
   detected_blocks$obs_end <- sapply(detected_blocks$h_col, function(j) h_to_obs(j)[2])
 
-  # Add signal observation based on signal_position method
   detected_blocks$signal_obs <- sapply(detected_blocks$h_col, function(j) {
     get_signal_obs(j, signal_position, y, eta, taus)
   })
 
-  # First detection (using signal_obs rather than obs_start)
   first_signal_holm <- if (length(significant_holm) > 0) {
     first_sig_block <- min(significant_holm)
     detected_blocks$signal_obs[first_sig_block]
@@ -904,21 +869,15 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
 
   list(
     detected_blocks = detected_blocks,
-    # Decorrelated gamma samples (n_iter x m x r)
     gamma_tilde = gamma_tilde,
-    # Per-quantile, per-block p-value matrices (m x r)
     pvalue_star = pvalue_star,
     pvalue_qj = pvalue_qj,
     adjp_holm = adjp_holm,
     adjp_bonf = adjp_bonf,
     adjp_bh = adjp_bh,
-    # Per-quantile null threshold
     epsilon = epsilon,
-    # Whitening matrix used for decorrelation
     Sigma_inv_sqrt = Sigma_inv_sqrt,
-    # Posterior covariance matrix
     Sigma = Sigma,
-    # Block-level summary
     pvalue_posterior = pvalue_posterior,
     n_significant_holm = length(significant_holm),
     n_significant_bonf = length(significant_bonf),
@@ -928,7 +887,8 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
     first_signal_bh = first_signal_bh,
     signal_position = signal_position,
     alternative = alternative,
-    alpha = alpha
+    alpha = alpha,
+    whiten = whiten
   )
 }
 
