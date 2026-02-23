@@ -44,7 +44,7 @@
 #' @param offset Optional numeric vector of length \eqn{n} added to the linear predictor.
 #' @param alpha Positive scalar exponent for adaptive LASSO weights (default 0.75).
 #' @param eps_w Positive scalar added to pilot estimates for numerical stability
-#'   in both adaptive LASSO weights and IQ shrinkage weights (default 1e-3).
+#'   in both adaptive LASSO weights and IQ shrinkage weights (default 1e-6).
 #' @param c_sigma Positive scalar scaling factor for the base scale (default 1.0).
 #' @param beta_sd Positive scalar prior std dev for \code{beta} coefficients (default 1.0).
 #' @param lambda_nc Positive scalar weight for the non-crossing penalty (larger is stricter).
@@ -123,7 +123,7 @@
 .bqq_stan_cache <- new.env(parent = emptyenv())
 
 getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
-                        alpha = 0.75, eps_w = 1e-3, c_sigma = 1.0,
+                        alpha = 0.75, eps_w = 1e-6, c_sigma = 1.0,
                         beta_sd = 1.0,
                         lambda_nc = 2, T_rel = 0.1,
                         adaptive_iq = TRUE,
@@ -635,12 +635,8 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       )
     }
 
-    med_w <- stats::median(w_gamma)
-    if (is.finite(med_w) && med_w > 0) {
-      w_gamma <- w_gamma / med_w
-    } else {
-      warning("Median of w_gamma is non-finite or non-positive; skipping normalization.")
-    }
+    # No median normalization: use raw adaptive weights per Zou (2006).
+    # lambda_lasso2 (learned from data via Gamma prior) handles overall penalty scale.
   }
 
   # ---- IQ weight matrices construction (data-driven adaptive weights) ----
