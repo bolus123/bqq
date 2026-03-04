@@ -7,6 +7,7 @@
 # 1. Predictive quantile-based inference (chi-squared tests on quantile vectors)
 # 2. Predictive distributional statistics-based inference (location, scale, skew, kurtosis)
 
+library(MASS)  # For mvrnorm
 
 # =============================================================================
 # Laplacian Approximation for MAP Inference
@@ -26,17 +27,6 @@
 #' @param noise_scale Scale factor for parameter perturbation (default: 0.1)
 #' @param seed Random seed for reproducibility
 #' @return List with parameter samples in the same structure as rstan::extract()
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.25, 0.5, 0.75)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' samples <- getLaplaceSamples(fit$map, n_samples = 100)
-#' }
 #' @export
 getLaplaceSamples <- function(map_fit, hessian = NULL, n_samples = 1000,
                               noise_scale = 0.1, seed = NULL) {
@@ -165,22 +155,10 @@ getLaplaceSamples <- function(map_fit, hessian = NULL, n_samples = 1000,
 #' @param fit_result Full result from getModel()
 #' @param H Design matrix for gamma coefficients
 #' @param X Design matrix for beta coefficients (including intercept)
-#' @param offset Optional numeric vector of length n added to the linear predictor.
 #' @param n_samples Number of samples for Laplace approximation (only used if fit_result
 #'   doesn't have laplace_samples and needs to generate them)
 #' @param seed Random seed (only used if generating new Laplace samples)
 #' @return 3D array [iterations, quantiles, time]
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.25, 0.5, 0.75)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' eta <- getEta(fit, H = H)
-#' }
 #' @export
 getEta <- function(fit_result, H, X = NULL, offset = NULL, n_samples = 1000, seed = NULL) {
 
@@ -307,7 +285,7 @@ getEta <- function(fit_result, H, X = NULL, offset = NULL, n_samples = 1000, see
 #' Compute BQQ chi-squared statistic for quantile vectors
 #'
 #' Implements the chi-squared-inspired charting statistic from the BQQ methodology:
-#' \eqn{W_t = Z_t' S^{-1} Z_t}
+#' W_t = Z_t' * S^{-1} * Z_t
 #' where Z_t = mean(Z_tr) across posterior draws r.
 #'
 #' The covariance S is estimated from the warm-up period to reflect the natural
@@ -331,18 +309,6 @@ getEta <- function(fit_result, H, X = NULL, offset = NULL, n_samples = 1000, see
 #' @param y Original data (required only for signal_position = "max_deviation")
 #' @param taus Quantile levels (required only for signal_position = "max_deviation")
 #' @return List with chi-squared statistics, p-values, and diagnostic info
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.25, 0.5, 0.75)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' eta <- getEta(fit, H = H)
-#' result <- getChisq_BQQ(eta, w = 20)
-#' }
 #' @export
 getChisq_BQQ <- function(eta, w = 0, use_differencing = FALSE,
                          df_method = "reduced", p_method = "empirical_null",
@@ -757,11 +723,15 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
   # When whiten=TRUE, gamma_tilde is decorrelated.
   # When whiten=FALSE, gamma_tilde is the raw gamma.
 
-  epsilon <- rep(0, m)
+  # Null threshold: Under H0 (no shift), gamma = 0
+  # We test against 0, not a data-driven threshold
+  epsilon <- rep(0, m)  # Null hypothesis: gamma = 0
 
   # ============================================================
   # Step 3: Per-Quantile, Per-Block Bayesian Posterior P-Values
   # ============================================================
+  # Compute posterior p-value: P(gamma_tilde <= 0 | data) for each (q, j)
+  # This tests whether the posterior mass is above or below 0
   pvalue_star <- matrix(NA, m, r)
   for (q in 1:m) {
     for (j in 1:r) {
@@ -769,43 +739,59 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
     }
   }
 
-  # Directional p-values
+  # Directional p-values (respecting the 'alternative' parameter)
+  # Two-sided: reject if posterior is concentrated far from 0 (either side)
+  # Greater: reject if posterior is concentrated above 0 (small pvalue_star)
+  # Less: reject if posterior is concentrated below 0 (large pvalue_star)
   if (alternative == "two.sided") {
     pvalue_qj <- 2 * pmin(pvalue_star, 1 - pvalue_star)
   } else if (alternative == "greater") {
+    # H1: gamma > 0, so p-value = P(gamma <= 0 | data) = pvalue_star
     pvalue_qj <- pvalue_star
   } else if (alternative == "less") {
+    # H1: gamma < 0, so p-value = P(gamma >= 0 | data) = 1 - pvalue_star
     pvalue_qj <- 1 - pvalue_star
   } else {
     stop("Unknown alternative: ", alternative, ". Must be 'two.sided', 'less', or 'greater'.")
   }
 
-  # Multiple testing corrections across ALL m*r p-values jointly
-  pvalue_vec <- as.vector(pvalue_qj)
+  # Apply multiple testing corrections across ALL m*r p-values jointly
+  pvalue_vec <- as.vector(pvalue_qj)  # length m*r (column-major: q varies fastest)
   adjp_holm_vec <- p.adjust(pvalue_vec, method = "holm")
   adjp_bonf_vec <- p.adjust(pvalue_vec, method = "bonferroni")
   adjp_bh_vec <- p.adjust(pvalue_vec, method = "BH")
 
+  # Reshape back to m x r matrices
   adjp_holm <- matrix(adjp_holm_vec, m, r)
   adjp_bonf <- matrix(adjp_bonf_vec, m, r)
   adjp_bh <- matrix(adjp_bh_vec, m, r)
 
-  # Block-level decision: block j significant if ANY quantile significant
+  # Block-level decision: block j significant if ANY quantile significant after correction
   sig_blocks_raw <- which(apply(pvalue_qj < alpha, 2, any))
   significant_holm <- which(apply(adjp_holm < alpha, 2, any))
   significant_bonf <- which(apply(adjp_bonf < alpha, 2, any))
   significant_bh <- which(apply(adjp_bh < alpha, 2, any))
 
+  # Per-block summary p-value: minimum across quantiles (for backward compat)
   pvalue_posterior <- apply(pvalue_qj, 2, min)
 
-  # Convert H column to observation number
+  # Convert H column to observation number.
+  # For combined designs (e.g., sustained + isolated + drift), H has multiple
+  # column groups sharing the same time blocks. Map h_col back to the actual
+  # time block using modular arithmetic so observation indices stay within [1, n].
+  n_data <- if (!is.null(y)) length(y) else NULL
+  r_per_type <- if (!is.null(n_data)) floor((n_data - w) / l) else r
+
   h_to_obs <- function(h_col) {
-    obs_start <- w + (h_col - 1) * l + 1
-    obs_end <- min(w + h_col * l, w + r * l)
+    # Map H column to actual time block (handles combined design)
+    actual_block <- ((h_col - 1) %% r_per_type) + 1
+    obs_start <- w + (actual_block - 1) * l + 1
+    obs_end_raw <- w + actual_block * l
+    obs_end <- if (!is.null(n_data)) min(obs_end_raw, n_data) else obs_end_raw
     c(obs_start, obs_end)
   }
 
-  # Helper: determine signal observation within a block
+  # Helper function to determine signal observation within a block
   get_signal_obs <- function(h_col, position_method, y_data = NULL, eta_data = NULL, tau_levels = NULL) {
     obs_range <- h_to_obs(h_col)
     obs_start <- obs_range[1]
@@ -813,23 +799,36 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
 
     if (position_method == "first") {
       return(obs_start)
+
     } else if (position_method == "last") {
       return(obs_end)
+
     } else if (position_method == "middle") {
       return(floor((obs_start + obs_end) / 2))
+
     } else if (position_method == "max_deviation") {
+      # Find observation with maximum deviation from the predictive median (fitted eta at tau = 0.5)
       if (is.null(y_data) || is.null(eta_data)) {
         warning("y and eta required for max_deviation; using 'first' instead")
         return(obs_start)
       }
+
+      # Find the index of the median quantile (tau = 0.5)
       if (!is.null(tau_levels)) {
         median_idx <- which.min(abs(tau_levels - 0.5))
       } else {
+        # Fallback to middle index if taus not provided
         median_idx <- ceiling(dim(eta_data)[2] / 2)
       }
+
+      # Compute posterior mean of the predictive median (fitted eta at tau = 0.5)
       eta_median <- apply(eta_data[, median_idx, , drop = FALSE], 3, mean)
+
+      # Calculate deviations for observations in this block
       block_obs <- obs_start:obs_end
       deviations <- abs(y_data[block_obs] - eta_median[block_obs])
+
+      # Return observation with maximum deviation
       max_dev_idx <- which.max(deviations)
       return(block_obs[max_dev_idx])
     }
@@ -838,20 +837,25 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
   # Compile results
   detected_blocks <- data.frame(
     h_col = 1:r,
+    # Block-level summary p-value (min across quantiles)
     pvalue_posterior = pvalue_posterior,
+    # Block-level significance flags (after joint m*r correction)
     significant_raw = 1:r %in% sig_blocks_raw,
     significant_holm = 1:r %in% significant_holm,
     significant_bonf = 1:r %in% significant_bonf,
     significant_bh = 1:r %in% significant_bh
   )
 
+  # Add observation ranges
   detected_blocks$obs_start <- sapply(detected_blocks$h_col, function(j) h_to_obs(j)[1])
   detected_blocks$obs_end <- sapply(detected_blocks$h_col, function(j) h_to_obs(j)[2])
 
+  # Add signal observation based on signal_position method
   detected_blocks$signal_obs <- sapply(detected_blocks$h_col, function(j) {
     get_signal_obs(j, signal_position, y, eta, taus)
   })
 
+  # First detection (using signal_obs rather than obs_start)
   first_signal_holm <- if (length(significant_holm) > 0) {
     first_sig_block <- min(significant_holm)
     detected_blocks$signal_obs[first_sig_block]
@@ -869,15 +873,21 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
 
   list(
     detected_blocks = detected_blocks,
+    # Decorrelated gamma samples (n_iter x m x r)
     gamma_tilde = gamma_tilde,
+    # Per-quantile, per-block p-value matrices (m x r)
     pvalue_star = pvalue_star,
     pvalue_qj = pvalue_qj,
     adjp_holm = adjp_holm,
     adjp_bonf = adjp_bonf,
     adjp_bh = adjp_bh,
+    # Per-quantile null threshold
     epsilon = epsilon,
+    # Whitening matrix used for decorrelation
     Sigma_inv_sqrt = Sigma_inv_sqrt,
+    # Posterior covariance matrix
     Sigma = Sigma,
+    # Block-level summary
     pvalue_posterior = pvalue_posterior,
     n_significant_holm = length(significant_holm),
     n_significant_bonf = length(significant_bonf),
@@ -902,18 +912,6 @@ detectChangepoints_gamma <- function(fit_result, taus, l, w,
 #' @param true_shift True shift observation (optional)
 #' @param main Plot title
 #' @param method Multiple testing correction to highlight: "holm" (default), "bonf", or "bh"
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.25, 0.5, 0.75)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' result <- detectChangepoints_gamma(fit, taus = taus, l = 20, w = 20)
-#' plot_gamma_detection(result)
-#' }
 #' @export
 plot_gamma_detection <- function(result, true_shift = NULL,
                                  main = "Gamma-Based Change-Point Detection",
@@ -997,18 +995,6 @@ plot_gamma_detection <- function(result, true_shift = NULL,
 #' @param eta 3D array [iterations, quantiles, time] from getEta()
 #' @param taus Vector of quantile levels (must include 0.05, 0.25, 0.5, 0.75, 0.95 or similar)
 #' @return 3D array [iterations, 4, time] containing QSS statistics
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.05, 0.25, 0.5, 0.75, 0.95)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' eta <- getEta(fit, H = H)
-#' qss <- getQSS(eta, taus = taus)
-#' }
 #' @export
 getQSS <- function(eta, taus = c(0.05, 0.25, 0.5, 0.75, 0.95)) {
 
@@ -1082,19 +1068,6 @@ getQSS <- function(eta, taus = c(0.05, 0.25, 0.5, 0.75, 0.95)) {
 #' @param y Original data (required only for signal_position = "max_deviation")
 #' @param taus Quantile levels (required only for signal_position = "max_deviation")
 #' @return List with chi-squared statistics and diagnostic info
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.05, 0.25, 0.5, 0.75, 0.95)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' eta <- getEta(fit, H = H)
-#' qss <- getQSS(eta, taus = taus)
-#' result <- getChisq_QSS(qss, w = 20)
-#' }
 #' @export
 getChisq_QSS <- function(qss, w = 0, use_differencing = FALSE,
                           df_method = "reduced", p_method = "chisq",
@@ -1128,18 +1101,6 @@ getChisq_QSS <- function(qss, w = 0, use_differencing = FALSE,
 #' @param true_shift True shift point (optional, for simulation)
 #' @param alpha Significance level for highlighting signals
 #' @param main Plot title
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.25, 0.5, 0.75)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' eta <- getEta(fit, H = H)
-#' plot_quantile_chart(y, eta, taus, w = 20)
-#' }
 #' @export
 plot_quantile_chart <- function(y, eta, taus, w = 0, chisq_result = NULL,
                                 true_shift = NULL, alpha = 0.05,
@@ -1187,19 +1148,6 @@ plot_quantile_chart <- function(y, eta, taus, w = 0, chisq_result = NULL,
 #' @param w Warm-up period
 #' @param true_shift True shift point (optional)
 #' @param main Plot title
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.25, 0.5, 0.75)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' eta <- getEta(fit, H = H)
-#' chisq_result <- getChisq_BQQ(eta, w = 20)
-#' plot_chisq_chart(chisq_result, w = 20)
-#' }
 #' @export
 plot_chisq_chart <- function(chisq_result, w = 0, true_shift = NULL,
                              main = "Chi-Squared Control Chart") {
@@ -1248,19 +1196,6 @@ plot_chisq_chart <- function(chisq_result, w = 0, true_shift = NULL,
 #' @param w Warm-up period
 #' @param true_shift True shift point (optional)
 #' @param main_prefix Prefix for subplot titles
-#' @examples
-#' \donttest{
-#' set.seed(123)
-#' n <- 100
-#' y <- rnorm(n)
-#' taus <- c(0.05, 0.25, 0.5, 0.75, 0.95)
-#' H <- getIsolatedShift(n, l = 20, w = 20)
-#' fit <- getModel(y, taus, H = H, w = 20, fit_method = "map",
-#'                 map_hessian = FALSE, map_iter = 500)
-#' eta <- getEta(fit, H = H)
-#' qss <- getQSS(eta, taus = taus)
-#' plot_qss_series(qss, w = 20)
-#' }
 #' @export
 plot_qss_series <- function(qss, w = 0, true_shift = NULL,
                              main_prefix = "") {
