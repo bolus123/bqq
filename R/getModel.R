@@ -340,10 +340,10 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
       matrix[m, r] gamma;
 
       // Group-level scale for group lasso (one per H column)
-      vector<lower=0>[r] tau_gamma_group;
+      vector<lower=0>[r] sigma2_gamma_group;
 
       // Element-wise local scales for lasso/adaptive lasso
-      matrix<lower=0>[m, r] tau_gamma;
+      matrix<lower=0>[m, r] sigma2_gamma;
 
       // Global LASSO rate (learned when adaptive_gamma = 1)
       real<lower=0> lambda_lasso2;
@@ -450,9 +450,9 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         // 1 = group lasso
         if (prior_code == 1) {
           for (i in 1:r) {
-            tau_gamma_group[i] ~ gamma( (m + 1) / 2, 0.5 * lambda_lasso2_eff );
+            sigma2_gamma_group[i] ~ gamma( (m + 1) / 2, 0.5 * lambda_lasso2_eff );
             for (j in 1:m) {
-              gamma[j, i] ~ normal(0, sqrt(tau_gamma_group[i]));
+              gamma[j, i] ~ normal(0, sqrt(sigma2_gamma_group[i]));
             }
           }
 
@@ -460,8 +460,8 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         } else if (prior_code == 2 || prior_code == 5) {
           for (j in 1:m) {
             for (i in 1:r) {
-              tau_gamma[j, i] ~ exponential(0.5 * lambda_lasso2_eff * square(w_gamma[j, i]));
-              gamma[j, i] ~ normal(0, sqrt(tau_gamma[j, i]));
+              sigma2_gamma[j, i] ~ exponential(0.5 * lambda_lasso2_eff * square(w_gamma[j, i]));
+              gamma[j, i] ~ normal(0, sqrt(sigma2_gamma[j, i]));
             }
           }
 
@@ -481,14 +481,14 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         // 4 = heterogeneous group lasso with Levy mixing
         // Groups by time block (consistent with group lasso prior_code=1)
         // omega_group[i]: block-level Levy scale (one per time block)
-        // tau_gamma[j, i]: element-specific scale (one per quantile x block)
+        // sigma2_gamma[j, i]: element-specific scale (one per quantile x block)
         } else if (prior_code == 4) {
           real c_levy = lambda_lasso2_eff / 2;
           for (i in 1:r) {
             omega_group[i] ~ inv_gamma(0.5, 0.5 * c_levy);
             for (j in 1:m) {
-              tau_gamma[j, i] ~ exponential(0.5 * square(omega_group[i] * w_gamma[j, i]));
-              gamma[j, i] ~ normal(0, sqrt(tau_gamma[j, i]));
+              sigma2_gamma[j, i] ~ exponential(0.5 * square(omega_group[i] * w_gamma[j, i]));
+              gamma[j, i] ~ normal(0, sqrt(sigma2_gamma[j, i]));
             }
           }
         }
@@ -815,11 +815,11 @@ getModel <- function(y, taus, H = NULL, X = NULL, offset = NULL, w = 0,
         theta_unc_full[tau_rw_idx] <- log(pmax(par_map[tau_rw_idx], 1e-10))
 
         # Also transform other constrained params for correct Hessian inversion:
-        # tau_gamma_group (<lower=0>): log
-        tgg_idx <- grep("^tau_gamma_group", raw_par_names)
+        # sigma2_gamma_group (<lower=0>): log
+        tgg_idx <- grep("^sigma2_gamma_group", raw_par_names)
         if (length(tgg_idx) > 0) theta_unc_full[tgg_idx] <- log(pmax(par_map[tgg_idx], 1e-10))
-        # tau_gamma (<lower=0>): log
-        tg_idx <- grep("^tau_gamma\\[", raw_par_names)
+        # sigma2_gamma (<lower=0>): log
+        tg_idx <- grep("^sigma2_gamma\\[", raw_par_names)
         if (length(tg_idx) > 0) theta_unc_full[tg_idx] <- log(pmax(par_map[tg_idx], 1e-10))
         # lambda_lasso2, lambda_iq2, omega_group (<lower=0>): log
         for (pat in c("^lambda_lasso2$", "^lambda_iq2$", "^omega_group")) {
